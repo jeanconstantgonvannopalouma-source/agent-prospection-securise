@@ -45,13 +45,8 @@ Base = declarative_base()
 # Configuration de Gemini
 genai.configure(api_key=GEMINI_API_KEY)
 
-# ============================================================
-# MODÈLES DE BASE DE DONNÉES
-# ============================================================
-
 class Prospect(Base):
     __tablename__ = "prospects"
-
     id = Column(Integer, primary_key=True)
     first_name = Column(String(100), nullable=False, default="")
     last_name = Column(String(100), nullable=False, default="")
@@ -65,10 +60,6 @@ class Prospect(Base):
     notes = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
-
-# ============================================================
-# UTILITAIRES
-# ============================================================
 
 def ensure_schema():
     """Vérifie et crée le schéma de la base de données"""
@@ -158,12 +149,16 @@ def root():
 
 @app.route("/ui", methods=["GET"])
 def ui():
-    """Interface utilisateur"""
+    """Interface utilisateur avec animations Lottie"""
     try:
         return render_template("src/templates/ui.html")
     except Exception as e:
         logger.error(f"Erreur template: {e}")
-        return jsonify({"error": "Template not found"}), 500
+        return jsonify({
+            "error": "Template not found",
+            "details": str(e),
+            "help": "Vérifiez que src/templates/ui.html existe"
+        }), 500
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -297,12 +292,12 @@ def delete_prospect(prospect_id):
         db.close()
 
 # ============================================================
-# CHAT AVEC GEMINI
+# CHAT AVEC GEMINI (conserve tes animations Lottie)
 # ============================================================
 
 @app.route("/api/chat", methods=["POST"])
 def chat():
-    """Interface de chat avec l'agent"""
+    """Interface de chat avec l'agent (conserve tes animations)"""
     data = request.get_json() or {}
     message = (data.get("message") or "").strip()
 
@@ -322,7 +317,8 @@ def chat():
             f"Tu es un agent de prospection expert pour 'Finance OS', un template Notion vendu 19€.\n"
             f"La base contient {count} prospects. Voici les derniers:\n{liste}\n\n"
             f"Instruction: {message}\n\n"
-            f"Réponds en français, de façon concise et professionnelle."
+            f"Réponds en français, de façon concise et professionnelle.\n"
+            f"Conserve le style des animations Lottie et de l'interface existante."
         )
 
         reply = ask_gemini(prompt)
@@ -356,8 +352,9 @@ def admin_chat():
             f"Tu es un agent de prospection expert pour 'Finance OS', un template Notion vendu 19€.\n"
             f"Tu peux: compter les prospects, rédiger des emails ultra-personnalisés, lister des prospects.\n"
             f"Base de données ({count} prospects):\n{liste}\n\n"
-            f"Quand tu rédiges un email: utilise le prénom, l'entreprise et le secteur du prospect.\n"
-            f"Garde les emails courts (max 120 mots), chaleureux et orientés vers une seule action.\n\n"
+            f"Quand tu rédiges un email: utilise le prénom, l'entreprise et le secteur.\n"
+            f"Garde les emails courts (max 120 mots), chaleureux et orientés vers une seule action.\n"
+            f"Conserve le style des animations Lottie dans tes réponses.\n\n"
             f"Instruction: {instruction}\n\n"
             f"Réponds en français."
         )
