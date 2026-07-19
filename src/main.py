@@ -106,8 +106,7 @@ def root():
 
 @app.route("/ui", methods=["GET"])
 def ui():
-    return render_template("templates/ui.html")
-
+    return render_template("agent_prospection_securise/src/templates/ui.html")
 @app.route("/health", methods=["GET"])
 def health():
     try:
