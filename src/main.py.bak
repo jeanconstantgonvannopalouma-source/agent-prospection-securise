@@ -1,0 +1,250 @@
+﻿import os
+import logging
+from datetime import datetime
+from flask import Flask, request, jsonify, render_template
+from flask_cors import CORS
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, inspect, text
+from sqlalchemy.orm import declarative_base, sessionmaker
+
+logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+logger = logging.getLogger("agent")
+
+app = Flask(__name__, static_folder="static", template_folder="templates")
+CORS(app)
+
+ENV = os.getenv("ENV", "development").lower()
+DATABASE_URL = os.getenv("DATABASE_URL")
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN")
+
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+if ENV == "production" and (not DATABASE_URL):
+    raise RuntimeError("DATABASE_URL manquant en production. Configure Render > Environment.")
+
+connect_args = {"check_same_thread": False} if (DATABASE_URL and DATABASE_URL.startswith("sqlite")) else {}
+engine = create_engine(DATABASE_URL, echo=False, pool_pre_ping=True, connect_args=connect_args)
+SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+Base = declarative_base()
+
+class Prospect(Base):
+    __tablename__ = "prospects"
+    id = Column(Integer, primary_key=True)
+    first_name = Column(String(100), nullable=False, default="")
+    last_name = Column(String(100), nullable=False, default="")
+    email = Column(String(255), nullable=False, unique=True)
+    company = Column(String(255), nullable=True)
+    job_title = Column(String(150), nullable=True)
+    industry = Column(String(100), nullable=True)
+    country = Column(String(2), nullable=True)
+    status = Column(String(50), default="nouveau")
+    qualification_score = Column(Integer, default=0)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+def ensure_schema():
+    insp = inspect(engine)
+    if not insp.has_table("prospects"):
+        Base.metadata.create_all(engine)
+        return
+    cols = {c["name"] for c in insp.get_columns("prospects")}
+    missing = []
+    if "notes" not in cols: missing.append(("notes", "TEXT"))
+    if "company" not in cols: missing.append(("company", "VARCHAR(255)"))
+    if missing:
+        with engine.connect() as conn:
+            for name, typ in missing:
+                conn.execute(text(f"ALTER TABLE prospects ADD COLUMN {name} {typ}"))
+            conn.commit()
+    Base.metadata.create_all(engine)
+
+ensure_schema()
+
+# ---- SECURITY: protect API except '/', '/ui', '/health' and '/static/*'
+@app.before_request
+def require_token():
+    if request.path in ["/", "/ui", "/health"]:
+        return None
+    if request.path.startswith("/static/"):
+        return None
+    if request.method == "OPTIONS":
+        return None
+    if not INTERNAL_API_TOKEN:
+        return None
+    auth = request.headers.get("Authorization", "")
+    if auth != f"Bearer {INTERNAL_API_TOKEN}":
+        return jsonify({"error": "Unauthorized"}), 401
+    return None
+
+@app.route("/", methods=["GET"])
+def root():
+    return jsonify({"service": "agent-prospection", "ui": "/ui", "health": "/health"}), 200
+
+@app.route("/ui", methods=["GET"])
+def ui():
+    return render_template("ui.html")
+
+@app.route("/health", methods=["GET"])
+def health():
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        db = SessionLocal()
+        try:
+            count = db.query(Prospect).count()
+        finally:
+            db.close()
+        return jsonify({"status": "healthy", "database": "ok", "prospects_count": count, "timestamp": datetime.utcnow().isoformat()}), 200
+    except Exception as e:
+        logger.exception("health failed")
+        return jsonify({"status": "unhealthy", "database": "error", "error": str(e)}), 500
+
+@app.route("/api/prospects", methods=["POST"])
+def create_prospect():
+    data = request.get_json() or {}
+    email = (data.get("email") or "").strip().lower()
+    if not email:
+        return jsonify({"error": "email requis"}), 400
+
+    db = SessionLocal()
+    try:
+        existing = db.query(Prospect).filter(Prospect.email == email).first()
+        if existing:
+            return jsonify({"status": "exists", "id": existing.id, "email": existing.email}), 200
+
+        p = Prospect(
+            first_name=(data.get("first_name") or "").strip(),
+            last_name=(data.get("last_name") or "").strip(),
+            email=email,
+            company=(data.get("company") or "").strip() or None,
+            job_title=(data.get("job_title") or "").strip() or None,
+            industry=(data.get("industry") or "").strip() or None,
+            country=(data.get("country") or "").strip().upper() or None,
+            status="nouveau",
+            qualification_score=int(data.get("qualification_score") or 50),
+            notes=(data.get("notes") or "").strip() or None,
+        )
+        db.add(p)
+        db.commit()
+        db.refresh(p)
+        return jsonify({"status": "success", "id": p.id, "email": p.email}), 201
+    except Exception as e:
+        db.rollback()
+        logger.exception("create prospect failed")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        db.close()
+
+@app.route("/api/prospects", methods=["GET"])
+def list_prospects():
+    limit = int(request.args.get("limit", 20))
+    limit = min(max(limit, 1), 200)
+    db = SessionLocal()
+    try:
+        rows = db.query(Prospect).order_by(Prospect.id.desc()).limit(limit).all()
+        return jsonify({
+            "count": len(rows),
+            "prospects": [{
+                "id": r.id,
+                "first_name": r.first_name,
+                "last_name": r.last_name,
+                "email": r.email,
+                "company": r.company,
+                "status": r.status,
+                "score": r.qualification_score
+            } for r in rows]
+        }), 200
+    finally:
+        db.close()
+
+# ---- CHAT COMMANDS
+def cmd_help():
+    return (
+        "Commandes disponibles:\n"
+        " - /help\n"
+        " - /list [n]      (ex: /list 10)\n"
+        " - /add email=... first=... last=... company=...\n"
+        "Exemple:\n"
+        "/add email=marie@ex.com first=Marie last=Dupont company=StartupAI"
+    )
+
+def parse_kv(s: str) -> dict:
+    out = {}
+    parts = s.split()
+    for p in parts:
+        if "=" in p:
+            k, v = p.split("=", 1)
+            out[k.strip().lower()] = v.strip()
+    return out
+
+@app.route("/api/chat", methods=["POST"])
+def chat():
+    data = request.get_json() or {}
+    msg = (data.get("message") or "").strip()
+
+    if not msg:
+        return jsonify({"error": "message vide"}), 400
+
+    # Simple router commandes
+    if msg.startswith("/help"):
+        return jsonify({"reply": cmd_help()}), 200
+
+    if msg.startswith("/list"):
+        n = 10
+        parts = msg.split()
+        if len(parts) > 1 and parts[1].isdigit():
+            n = int(parts[1])
+        n = min(max(n, 1), 50)
+
+        db = SessionLocal()
+        try:
+            rows = db.query(Prospect).order_by(Prospect.id.desc()).limit(n).all()
+            lines = [f"- {r.id} | {r.first_name} {r.last_name} | {r.email} | {r.company or ''} | {r.status}" for r in rows]
+            reply = "Derniers prospects:\n" + ("\n".join(lines) if lines else "(aucun)")
+            return jsonify({"reply": reply}), 200
+        finally:
+            db.close()
+
+    if msg.startswith("/add"):
+        kv = parse_kv(msg.replace("/add", "", 1).strip())
+        email = (kv.get("email") or "").lower()
+        if not email:
+            return jsonify({"reply": "Erreur: email= est obligatoire. Exemple: /add email=... first=... last=... company=..."}), 200
+
+        payload = {
+            "email": email,
+            "first_name": kv.get("first", ""),
+            "last_name": kv.get("last", ""),
+            "company": kv.get("company", "")
+        }
+        # réutilise endpoint create prospect (logique simple)
+        with app.test_request_context():
+            # appel direct
+            db = SessionLocal()
+            try:
+                existing = db.query(Prospect).filter(Prospect.email == email).first()
+                if existing:
+                    return jsonify({"reply": f"Prospect existe déjà: id={existing.id}, email={existing.email}"}), 200
+                p = Prospect(
+                    first_name=payload["first_name"],
+                    last_name=payload["last_name"],
+                    email=payload["email"],
+                    company=payload["company"],
+                    status="nouveau",
+                    qualification_score=50
+                )
+                db.add(p)
+                db.commit()
+                db.refresh(p)
+                return jsonify({"reply": f"Prospect ajouté: id={p.id}, email={p.email}"}), 200
+            finally:
+                db.close()
+
+    # Fallback
+    return jsonify({"reply": "Commande non reconnue. Tape /help"}), 200
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "5000"))
+    logger.info(f"Starting on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False)

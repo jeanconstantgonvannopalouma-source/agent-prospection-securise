@@ -1,0 +1,42 @@
+﻿<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Agent de Prospection</title>
+  <link rel="stylesheet" href="/static/ui.css" />
+</head>
+<body>
+  <canvas id="bg"></canvas>
+
+  <div class="overlay">
+    <header class="topbar">
+      <div>
+        <div class="title">Agent de Prospection</div>
+        <div class="subtitle">Mode commandes (chat) + fond 3D</div>
+      </div>
+
+      <div class="tokenBox">
+        <input id="tokenInput" type="password" placeholder="INTERNAL_API_TOKEN (Bearer)" />
+        <button id="saveTokenBtn">Sauvegarder</button>
+      </div>
+    </header>
+
+    <main class="chat">
+      <div id="messages" class="messages"></div>
+
+      <div class="composer">
+        <input id="msgInput" type="text" placeholder="Ex: /help, /list 10, /add email=... company=..." />
+        <button id="sendBtn">Envoyer</button>
+      </div>
+
+      <div class="hint">
+        Commandes rapides: <code>/help</code>, <code>/list 10</code>, <code>/add email=... first=... last=... company=...</code>
+      </div>
+    </main>
+  </div>
+
+  <script type="module" src="/static/bg3d.js"></script>
+  <script src="/static/ui.js"></script>
+</body>
+</html>

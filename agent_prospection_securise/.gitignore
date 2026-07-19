@@ -1,0 +1,70 @@
+$content = @"
+# Environnement
+.env
+.env.local
+.env.*.local
+venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+*.cover
+.hypothesis/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+logs/
+*.log
+*.log.*
+
+# Base de données
+*.db
+*.sqlite
+*.sqlite3
+
+# Temporaires
+tmp/
+temp/
+*.tmp
+.env.bak
+secrets_temp.txt
+
+# Secrets
+.env
+.env.production
+config/secrets.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Données sensibles
+data/prospects/*.csv
+data/cache/*
+!data/.gitkeep
+"@
+
+$content | Out-File -FilePath ".gitignore" -Encoding UTF8 -NoNewline
+Write-Host "✓ Fichier créé: .gitignore" -ForegroundColor Green
