@@ -1,24 +1,70 @@
 ﻿<!DOCTYPE html>
-<html>
+<html lang="fr">
 <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Agent de Prospection</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js"></script>
     <style>
-        body { font-family: Arial; background: #0f172a; color: white; padding: 20px; }
-        #lottie-header { width: 100px; height: 100px; }
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: Arial, Helvetica, sans-serif;
+            background: linear-gradient(135deg, #0f172a, #1e3a5f);
+            color: white;
+        }
+        .container {
+            width: min(1100px, calc(100% - 32px));
+            margin: 0 auto;
+            padding: 32px 0;
+        }
+        #lottie-header {
+            width: 90px;
+            height: 90px;
+        }
+        .message {
+            max-width: 82%;
+            margin: 10px 0;
+            padding: 13px 15px;
+            border-radius: 12px;
+            background: white;
+            color: #1e293b;
+        }
     </style>
 </head>
 <body>
-    <h1>Agent de Prospection</h1>
-    <div id="lottie-header"></div>
-    <div id="messages"></div>
+    <div class="container">
+        <div id="lottie-header"></div>
+        <h1>Agent de Prospection</h1>
+        <div id="messages"></div>
+        <input id="prompt" type="text" placeholder="Posez votre question...">
+        <button id="send">Envoyer</button>
+    </div>
+
     <script>
+        // Animations Lottie
         lottie.loadAnimation({
             container: document.getElementById("lottie-header"),
             renderer: "svg",
             loop: true,
             autoplay: true,
             path: "https://assets10.lottiefiles.com/packages/lf20_qp1q7mct.json"
+        });
+
+        // Chat basique
+        document.getElementById("send").addEventListener("click", async () => {
+            const prompt = document.getElementById("prompt").value;
+            const response = await fetch("/api/chat", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ message: prompt })
+            });
+            const data = await response.json();
+            const msgDiv = document.createElement("div");
+            msgDiv.className = "message";
+            msgDiv.textContent = data.reply;
+            document.getElementById("messages").appendChild(msgDiv);
         });
     </script>
 </body>
