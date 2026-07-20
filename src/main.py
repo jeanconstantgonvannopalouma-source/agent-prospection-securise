@@ -7,6 +7,8 @@ from datetime import datetime
 
 from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, inspect, text
+from sqlalchemy.orm import declarative_base, sessionmaker
 
 # ============================================================
 # CONFIGURATION
@@ -25,11 +27,9 @@ INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
-# Correction de l'URL PostgreSQL
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-# Configuration de la base de données
 if not DATABASE_URL:
     DATABASE_URL = "sqlite:///./agent_prospection.db"
     logger.warning("Mode local: SQLite utilisé.")
@@ -58,7 +58,48 @@ class Prospect(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
-# [Le reste de tes modèles et fonctions existantes...]
+def ensure_schema():
+    insp = inspect(engine)
+    if not insp.has_table("prospects"):
+        Base.metadata.create_all(engine)
+        logger.info("Table prospects créée.")
+        return
+
+    cols = {c["name"] for c in insp.get_columns("prospects")}
+    missing = []
+
+    for col, typ in [
+        ("company", "VARCHAR(255)"),
+        ("job_title", "VARCHAR(150)"),
+        ("industry", "VARCHAR(100)"),
+        ("country", "VARCHAR(2)"),
+        ("status", "VARCHAR(50)"),
+        ("qualification_score", "INTEGER"),
+        ("notes", "TEXT"),
+        ("created_at", "TIMESTAMP"),
+        ("updated_at", "TIMESTAMP")
+    ]:
+        if col not in cols:
+            missing.append((col, typ))
+
+    if missing:
+        logger.warning(f"Colonnes manquantes détectées: {missing}")
+        with engine.connect() as conn:
+            for name, typ in missing:
+                conn.execute(text(f"ALTER TABLE prospects ADD COLUMN {name} {typ}"))
+            conn.commit()
+        logger.info("Migration automatique effectuée.")
+
+    Base.metadata.create_all(engine)
+
+def ask_gemini(prompt: str) -> str:
+    try:
+        model = genai.GenerativeModel(GEMINI_MODEL)
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        logger.error(f"Erreur Gemini: {e}")
+        return f"Erreur IA: {str(e)}"
 
 # ============================================================
 # INTERFACE UI DIRECTEMENT DANS FLASK (SOLUTION ULTIME)
@@ -66,9 +107,8 @@ class Prospect(Base):
 
 @app.route("/ui")
 def ui():
-    """Interface utilisateur SANS TEMPLATE"""
-    html_content = """
-<!DOCTYPE html>
+    """Interface utilisateur SANS TEMPLATE - SOLUTION ULTIME"""
+    html_content = """<!DOCTYPE html>
 <html lang="fr">
 <head>
     <meta charset="UTF-8">
@@ -101,6 +141,25 @@ def ui():
             background: white;
             color: #1e293b;
         }
+        #prompt {
+            flex: 1;
+            min-width: 0;
+            padding: 13px;
+            border: 1px solid #cbd5e1;
+            border-radius: 9px;
+            font-size: 15px;
+            outline: none;
+        }
+        #send-button {
+            padding: 13px 18px;
+            border: 0;
+            border-radius: 9px;
+            color: white;
+            background: #2563eb;
+            font-size: 15px;
+            font-weight: bold;
+            cursor: pointer;
+        }
     </style>
 </head>
 <body>
@@ -108,8 +167,10 @@ def ui():
         <div id="lottie-header"></div>
         <h1>Agent de Prospection</h1>
         <div id="messages"></div>
-        <input id="prompt" type="text" placeholder="Posez votre question...">
-        <button id="send">Envoyer</button>
+        <div style="display: flex; gap: 10px; padding: 18px;">
+            <input id="prompt" type="text" placeholder="Posez votre question..." autocomplete="off" required>
+            <button id="send-button">Envoyer</button>
+        </div>
     </div>
 
     <script>
@@ -123,7 +184,7 @@ def ui():
         });
 
         // Chat basique
-        document.getElementById("send").addEventListener("click", async () => {
+        document.getElementById("send-button").addEventListener("click", async () => {
             const prompt = document.getElementById("prompt").value;
             const response = await fetch("/api/chat", {
                 method: "POST",
@@ -138,11 +199,10 @@ def ui():
         });
     </script>
 </body>
-</html>
-"""
+</html>"""
     return Response(html_content, mimetype="text/html")
 
-# [Le reste de ton code existant...]
+# [Le reste de ton code API existant...]
 
 if __name__ == "__main__":
     ensure_schema()
