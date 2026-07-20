@@ -2,5 +2,5 @@
 flask-cors==4.0.0
 sqlalchemy==2.0.25
 psycopg2-binary==2.9.9
-google-generativeai==0.7.2  # Version stable et testée
+google-generativeai==0.7.2
 gunicorn==21.2.0
