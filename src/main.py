@@ -209,3 +209,34 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info(f"Starting on port {port}")
     app.run(host="0.0.0.0", port=port, debug=False)
+from flask import request, jsonify
+import logging
+
+@app.route("/api/chat", methods=["POST"])
+def chat():
+    """Route de chat avec Gemini"""
+    data = request.get_json() or {}
+    message = (data.get("message") or "").strip()
+
+    if not message:
+        return jsonify({"error": "Message vide"}), 400
+
+    try:
+        # Compte les prospects
+        db = SessionLocal()
+        count = db.query(Prospect).count()
+        db.close()
+
+        # Appel à Gemini
+        prompt = f"""
+        Tu es un agent de prospection pour Finance OS (template Notion à 19€).
+        La base contient {count} prospects.
+        Réponds à cette question de façon concise et professionnelle: {message}
+        """
+
+        response = ask_gemini(prompt)
+        return jsonify({"reply": response}), 200
+
+    except Exception as e:
+        logging.error(f"Erreur chat: {e}")
+        return jsonify({"error": str(e)}), 500
