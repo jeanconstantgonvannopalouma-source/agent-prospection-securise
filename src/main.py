@@ -66,6 +66,16 @@ def ui():
 
         document.getElementById("send").addEventListener("click", async () => {
             const prompt = document.getElementById("prompt").value;
+            if (!prompt.trim()) return;
+
+            const msgDiv = document.createElement("div");
+            msgDiv.style.cssText = "background:white;color:black;padding:10px;margin:5px 0;border-radius:5px;max-width:80%;margin-left:auto;background:#2563eb;color:white;";
+            msgDiv.textContent = prompt;
+            document.getElementById("messages").appendChild(msgDiv);
+            document.getElementById("prompt").value = "";
+            document.getElementById("send").disabled = true;
+            document.getElementById("send").textContent = "...";
+
             const response = await fetch("/api/chat", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -119,3 +129,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info(f"Démarrage sur le port {port}")
     app.run(host="0.0.0.0", port=port)
+
