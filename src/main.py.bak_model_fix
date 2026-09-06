@@ -49,54 +49,23 @@ try:
     import google.generativeai as genai
     if GEMINI_API_KEY:
         genai.configure(api_key=GEMINI_API_KEY)
-        candidates = []
-        # 1) modele force via env
-        if GEMINI_MODEL_ENV:
-            candidates.append(GEMINI_MODEL_ENV)
-        # 2) modeles modernes (plus de gemini-pro legacy)
-        candidates += [
-            "gemini-2.0-flash",
-            "gemini-2.0-flash-001",
-            "gemini-2.5-flash",
-            "gemini-flash-latest",
-            "gemini-1.5-flash",
-            "gemini-1.5-flash-latest",
-            "gemini-1.5-flash-001",
-            "gemini-1.5-pro",
-            "gemini-1.5-pro-latest",
-        ]
-        # 3) modeles dynamiques exposes par l API
-        try:
-            for m in genai.list_models():
-                methods = list(getattr(m, "supported_generation_methods", []) or [])
-                if "generateContent" in methods:
-                    short = (getattr(m, "name", "") or "").replace("models/", "")
-                    if short:
-                        candidates.append(short)
-        except Exception as e:
-            logger.warning(f"list_models impossible: {e}")
-
+        candidates = [GEMINI_MODEL_ENV, "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
+        # de-dup
         seen = set()
         models_to_try = []
         for n in candidates:
-            n = (n or "").strip()
-            if not n or n in seen:
-                continue
-            # ignorer explicitement les modeles morts
-            if n in {"gemini-pro", "gemini-1.0-pro", "chat-bison-001"}:
-                continue
-            seen.add(n)
-            models_to_try.append(n)
-
+            if n and n not in seen:
+                seen.add(n)
+                models_to_try.append(n)
         for name in models_to_try:
             try:
                 m = genai.GenerativeModel(name)
+                # vrai smoke test
                 r = m.generate_content("Reponds un mot: OK")
                 txt = (getattr(r, "text", None) or "").strip()
                 if txt:
                     ACTIVE_MODEL_NAME = name
                     GEMINI_AVAILABLE = True
-                    LAST_GEMINI_ERROR = None
                     logger.info(f"Gemini OK smoke-test: {name} -> {txt[:40]}")
                     break
                 else:
