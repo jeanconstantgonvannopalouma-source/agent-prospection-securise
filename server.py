@@ -1,5 +1,5 @@
 ﻿"""
-SERVEUR WEB PROSPECTING AGENT - JEAN CONSTANT GONVANNO PALOUMA
+SERVEUR WEB PROSPECTING AGENT - JEAN CONSTANT V27.1 (DIAGNOSTIC ERREUR RENDER)
 """
 import os
 import sys
@@ -23,12 +23,19 @@ CORS(app)
 
 PORT = int(os.getenv("PORT", "5001"))
 
-VALID_CHAT_MODELS = [
-    os.getenv("GEMINI_MODEL", "gemini-3.6-flash"),
+# Liste élargie des modèles Gemini supportés par l'API
+CANDIDATE_MODELS = [
+    os.getenv("GEMINI_MODEL", "").strip().strip('"').strip("'"),
+    "gemini-1.5-flash",
+    "gemini-2.0-flash",
+    "gemini-1.5-pro",
+    "gemini-2.5-flash",
     "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemini-flash-latest"
 ]
+# Filtrage des éléments vides
+CANDIDATE_MODELS = [m for m in CANDIDATE_MODELS if m]
 
 @app.route('/')
 @app.route('/ui')
@@ -46,11 +53,16 @@ def chat_endpoint():
     payload = request.get_json() or {}
     user_msg = payload.get("message", "").strip()
 
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        return jsonify({"reply": "❌ Erreur: Clé GEMINI_API_KEY introuvable."})
+    raw_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
+    api_key = raw_key.strip().strip('"').strip("'")
 
-    genai.configure(api_key=api_key)
+    if not api_key:
+        return jsonify({"reply": "❌ Erreur: Clé GEMINI_API_KEY introuvable sur Render. Veuillez l'ajouter dans l'onglet Environment de Render."})
+
+    try:
+        genai.configure(api_key=api_key)
+    except Exception as e:
+        return jsonify({"reply": f"❌ Erreur de configuration de la clé API : {str(e)}"})
 
     recent_emails = email_assistant.fetch_recent_inbox_emails(count=5)
     stats = db_adapter.get_stats()
@@ -74,9 +86,9 @@ def chat_endpoint():
 
         if target_email:
             subj = f"Échange concernant {contact.get('company', 'votre projet')}"
-            body = f"Bonjour {target_name},\n\nJe fais suite à nos récents échanges concernant vos enjeux de croissance. Auriez-vous une disponibilité cette semaine pour un rapide point ?\n\nBien à vous,\nJean Constant Gonvanno Palouma\n+33 6 20 07 81 93"
+            body = f"Bonjour {target_name},\n\nJe fais suite à nos récents échanges. Auriez-vous une disponibilité cette semaine pour un rapide point ?\n\nBien à vous,\nJean Constant Gonvanno Palouma\n+33 6 20 07 81 93"
             
-            send_res = email_sender.send_email(target_email, subj, body, prospect_name=target_name)
+            email_sender.send_email(target_email, subj, body, prospect_name=target_name)
             return jsonify({
                 "reply": f"✅ EMAIL RÉDIGÉ ET ENVOYÉ À {target_name} ({target_email}) !\n\nObjet : {subj}\n\n{body}"
             })
@@ -104,18 +116,21 @@ DIRECTIVES DE COMPORTEMENT :
 """
     full_prompt = f"{system_instruction}\n\nUTILISATEUR : {user_msg}"
 
-    for model_name in VALID_CHAT_MODELS:
-        if not model_name: continue
+    last_error_msg = ""
+    for model_name in CANDIDATE_MODELS:
         try:
             model = genai.GenerativeModel(model_name)
             response = model.generate_content(full_prompt)
             clean_reply = response.text.replace("***", "").replace("---", "==================================================")
+            print(f"✓ Succès avec le modèle : {model_name}")
             return jsonify({"reply": clean_reply.strip(), "active_model": model_name})
-        except Exception:
+        except Exception as e:
+            last_error_msg = str(e)
+            print(f"⚠️ Échec sur {model_name} : {last_error_msg}")
             continue
 
-    return jsonify({"reply": "⚠️ Tous les modèles Gemini sont temporairement indisponibles."})
+    return jsonify({"reply": f"⚠️ Impossible de contacter Gemini sur Render.\nDétail de l'erreur reçue de l'API : {last_error_msg}"})
 
 if __name__ == '__main__':
-    print(f"\n🚀 SERVEUR CONNECTÉ A GMAIL (jeanconstantgonvannopalouma@gmail.com) EN LIGNE SUR http://localhost:{PORT}")
+    print(f"\n🚀 SERVEUR CLOUD EN LIGNE SUR http://localhost:{PORT}")
     app.run(host='0.0.0.0', port=PORT, debug=False)
