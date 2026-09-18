@@ -1,0 +1,570 @@
+﻿import os
+import logging
+import smtplib
+import re
+import traceback
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from flask import Flask, jsonify, Response, request
+from flask_cors import CORS
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, inspect, text
+from sqlalchemy.orm import declarative_base, sessionmaker
+from datetime import datetime
+from collections import defaultdict
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("agent")
+
+app = Flask(__name__)
+CORS(app)
+
+DATABASE_URL       = os.getenv("DATABASE_URL", "")
+INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "")
+GEMINI_API_KEY     = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip().strip('"').strip("'")
+GEMINI_MODEL_ENV   = (os.getenv("GEMINI_MODEL") or "gemini-2.0-flash").strip()
+SMTP_SERVER        = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT          = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER          = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD      = os.getenv("SMTP_PASSWORD", "")
+
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+if not DATABASE_URL:
+    DATABASE_URL = "sqlite:///./agent_prospection.db"
+
+connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+engine = create_engine(DATABASE_URL, echo=False, pool_pre_ping=True, connect_args=connect_args)
+SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+Base = declarative_base()
+
+CHAT_HISTORY = defaultdict(list)
+MAX_HISTORY = 16
+
+GEMINI_AVAILABLE = False
+ACTIVE_MODEL_NAME = None
+LAST_GEMINI_ERROR = None
+genai = None
+
+try:
+    import google.generativeai as genai
+    if GEMINI_API_KEY:
+        genai.configure(api_key=GEMINI_API_KEY)
+        candidates = []
+        # 1) modele force via env
+        if GEMINI_MODEL_ENV:
+            candidates.append(GEMINI_MODEL_ENV)
+        # 2) modeles modernes (plus de gemini-pro legacy)
+        candidates += [
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-001",
+            "gemini-2.5-flash",
+            "gemini-flash-latest",
+            "gemini-1.5-flash",
+            "gemini-1.5-flash-latest",
+            "gemini-1.5-flash-001",
+            "gemini-1.5-pro",
+            "gemini-1.5-pro-latest",
+        ]
+        # 3) modeles dynamiques exposes par l API
+        try:
+            for m in genai.list_models():
+                methods = list(getattr(m, "supported_generation_methods", []) or [])
+                if "generateContent" in methods:
+                    short = (getattr(m, "name", "") or "").replace("models/", "")
+                    if short:
+                        candidates.append(short)
+        except Exception as e:
+            logger.warning(f"list_models impossible: {e}")
+
+        seen = set()
+        models_to_try = []
+        for n in candidates:
+            n = (n or "").strip()
+            if not n or n in seen:
+                continue
+            # ignorer explicitement les modeles morts
+            if n in {"gemini-pro", "gemini-1.0-pro", "chat-bison-001"}:
+                continue
+            seen.add(n)
+            models_to_try.append(n)
+
+        for name in models_to_try:
+            try:
+                m = genai.GenerativeModel(name)
+                r = m.generate_content("Reponds un mot: OK")
+                txt = (getattr(r, "text", None) or "").strip()
+                if txt:
+                    ACTIVE_MODEL_NAME = name
+                    GEMINI_AVAILABLE = True
+                    LAST_GEMINI_ERROR = None
+                    logger.info(f"Gemini OK smoke-test: {name} -> {txt[:40]}")
+                    break
+                else:
+                    logger.warning(f"Modele {name} reponse vide au smoke-test")
+            except Exception as e:
+                LAST_GEMINI_ERROR = f"{type(e).__name__}: {e}"
+                logger.warning(f"Modele {name} fail: {LAST_GEMINI_ERROR}")
+        if not GEMINI_AVAILABLE:
+            logger.error(f"Aucun modele Gemini utilisable. Derniere erreur: {LAST_GEMINI_ERROR}")
+    else:
+        LAST_GEMINI_ERROR = "GEMINI_API_KEY manquante"
+        logger.warning(LAST_GEMINI_ERROR)
+except Exception as e:
+    LAST_GEMINI_ERROR = f"Import/config: {type(e).__name__}: {e}"
+    logger.error(LAST_GEMINI_ERROR)
+
+class Prospect(Base):
+    __tablename__ = "prospects"
+    id = Column(Integer, primary_key=True)
+    first_name = Column(String(100), nullable=False, default="")
+    last_name = Column(String(100), nullable=False, default="")
+    email = Column(String(255), nullable=False, unique=True)
+    company = Column(String(255), nullable=True)
+    job_title = Column(String(150), nullable=True)
+    industry = Column(String(100), nullable=True)
+    country = Column(String(2), nullable=True)
+    status = Column(String(50), default="nouveau")
+    qualification_score = Column(Integer, default=50)
+    notes = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+def ensure_schema():
+    insp = inspect(engine)
+    if not insp.has_table("prospects"):
+        Base.metadata.create_all(engine)
+        return
+    cols = {c["name"] for c in insp.get_columns("prospects")}
+    for col, typ in [
+        ("company","VARCHAR(255)"),("job_title","VARCHAR(150)"),
+        ("industry","VARCHAR(100)"),("country","VARCHAR(2)"),
+        ("status","VARCHAR(50)"),("qualification_score","INTEGER"),
+        ("notes","TEXT"),("created_at","TIMESTAMP"),("updated_at","TIMESTAMP")
+    ]:
+        if col not in cols:
+            with engine.connect() as conn:
+                conn.execute(text(f"ALTER TABLE prospects ADD COLUMN {col} {typ}"))
+                conn.commit()
+    Base.metadata.create_all(engine)
+
+ensure_schema()
+
+SYSTEM_PROMPT = """Tu es un co-pilote de prospection elite (coach commercial + copywriter + stratege).
+Tu travailles AVEC l'utilisateur sur N'IMPORTE quelle offre / cible / marche.
+Pas de catalogue produit fixe. Pas de phrase d'accueil repetitive.
+
+Regles:
+- Francais naturel, direct, utile
+- Si message vague (salut/discuter): reponds humainement, propose 3 pistes, pose 1 question
+- Si brief clair: livre un deliverable concret (ICP, email, plan de session, script...)
+- Ne repete jamais le meme message
+- Utilise le contexte prospects s'il est pertinent
+"""
+
+def build_db_context(db):
+    count = db.query(Prospect).count()
+    nouveaux = db.query(Prospect).filter(Prospect.status == "nouveau").count()
+    contactes = db.query(Prospect).filter(Prospect.status == "contacté").count()
+    derniers = db.query(Prospect).order_by(Prospect.id.desc()).limit(8).all()
+    liste = "\n".join([
+        f"- ID:{p.id} | {p.first_name} {p.last_name} | {p.email} | {p.company or '-'} | {p.status}"
+        for p in derniers
+    ]) or "(aucun prospect)"
+    return f"Prospects: {count} total | {nouveaux} nouveaux | {contactes} contactes\n{liste}"
+
+def smart_fallback(user_message: str, history: list, db_context: str) -> str:
+    msg = (user_message or "").strip().lower()
+    if re.search(r"\b(salut|bonjour|hello|hey|coucou)\b", msg) and len(msg) < 50:
+        return (
+            "Salut ! Content de te lire.\n\n"
+            "On peut enchaîner direct sur:\n"
+            "1) définir ta cible (ICP)\n"
+            "2) écrire un cold email / LinkedIn\n"
+            "3) préparer une session de prospection 45 min\n\n"
+            "Tu préfères laquelle, et tu vends quoi en une phrase ?"
+        )
+    if any(x in msg for x in ["discut", "parler", "bavarder", "ensemble"]):
+        return (
+            "Ok, mode discussion utile.\n\n"
+            "Balance juste 3 trucs:\n"
+            "- ton offre\n- ta cible\n- ton frein du moment (message, volume, peur du cold, pricing...)\n\n"
+            "Je m'adapte et on construit la suite ensemble."
+        )
+    if any(x in msg for x in ["email", "cold", "linkedin", "script", "relance"]):
+        return (
+            "Je te rédige le message. Envoie:\n"
+            "offre / cible / canal (email ou LinkedIn) / ton souhaité / 1 preuve si tu as.\n"
+            "Je te sors version longue + courte + accroche."
+        )
+    if any(x in msg for x in ["session", "prépare", "prepare", "prospection", "campagne"]):
+        return (
+            "Prep session — donne-moi: offre + cible + temps dispo.\n"
+            "Je te sors: objectif, ICP, angle, scripts, objections, plan minute par minute."
+        )
+    if any(x in msg for x in ["prospect", "base", "liste"]):
+        return f"Voici ta base:\n{db_context}\n\nOn priorise qui, et on écrit quoi ?"
+    return (
+        f"Compris: « {user_message} ».\n\n"
+        "Pour te livrer quelque chose de précis, ajoute offre + cible + objectif (rdv/vente/demo).\n"
+        f"Contexte base:\n{db_context}"
+    )
+
+def extract_text(response) -> str:
+    try:
+        t = getattr(response, "text", None)
+        if t and str(t).strip():
+            return str(t).strip()
+    except Exception:
+        pass
+    try:
+        cands = getattr(response, "candidates", None) or []
+        parts = []
+        for c in cands:
+            content = getattr(c, "content", None)
+            if not content:
+                continue
+            for p in getattr(content, "parts", []) or []:
+                pt = getattr(p, "text", None)
+                if pt:
+                    parts.append(pt)
+        return "\n".join(parts).strip()
+    except Exception:
+        return ""
+
+def ask_gemini(user_message: str, db_context: str, history: list):
+    """Retourne (reply, meta_dict)"""
+    global LAST_GEMINI_ERROR
+    meta = {
+        "engine": "fallback",
+        "model": ACTIVE_MODEL_NAME,
+        "gemini_available": GEMINI_AVAILABLE,
+        "error": None,
+    }
+
+    if not GEMINI_AVAILABLE or not GEMINI_API_KEY or genai is None:
+        meta["error"] = LAST_GEMINI_ERROR or "Gemini indisponible"
+        return smart_fallback(user_message, history, db_context), meta
+
+    history_txt = ""
+    for turn in history[-MAX_HISTORY:]:
+        role = "Utilisateur" if turn["role"] == "user" else "Agent"
+        history_txt += f"{role}: {turn['content']}\n"
+
+    prompt = (
+        f"{SYSTEM_PROMPT}\n\n"
+        f"=== BASE PROSPECTS ===\n{db_context}\n\n"
+        f"=== HISTORIQUE ===\n{history_txt or '(debut)'}\n\n"
+        f"=== MESSAGE ===\n{user_message}\n\n"
+        f"Reponds maintenant (naturel, utile, sans te repeter):"
+    )
+
+    try:
+        model = genai.GenerativeModel(ACTIVE_MODEL_NAME or GEMINI_MODEL_ENV)
+        response = model.generate_content(
+            prompt,
+            generation_config={
+                "temperature": float(os.getenv("GEMINI_TEMPERATURE", "0.7") or 0.7),
+                "max_output_tokens": int(os.getenv("GEMINI_MAX_TOKENS", "2048") or 2048),
+            },
+        )
+        text = extract_text(response)
+        if not text:
+            LAST_GEMINI_ERROR = "Reponse Gemini vide (maybe blocked/safety)"
+            meta["error"] = LAST_GEMINI_ERROR
+            meta["engine"] = "fallback"
+            logger.error(LAST_GEMINI_ERROR + f" raw={response}")
+            return smart_fallback(user_message, history, db_context), meta
+
+        meta["engine"] = "gemini"
+        meta["error"] = None
+        return text, meta
+    except Exception as e:
+        LAST_GEMINI_ERROR = f"{type(e).__name__}: {e}"
+        meta["error"] = LAST_GEMINI_ERROR
+        meta["engine"] = "fallback"
+        logger.error("Gemini call failed: %s\n%s", LAST_GEMINI_ERROR, traceback.format_exc())
+        return smart_fallback(user_message, history, db_context), meta
+
+def send_email_smtp(to_email: str, subject: str, body: str) -> bool:
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = SMTP_USER
+        msg["To"] = to_email
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.send_message(msg)
+        return True
+    except Exception as e:
+        logger.error(f"SMTP: {e}")
+        return False
+
+@app.before_request
+def require_token():
+    public = ["/", "/ui", "/health", "/api/chat", "/api/admin/chat", "/api/admin/stats", "/favicon.ico"]
+    if request.path in public or request.path.startswith("/static/") or request.method == "OPTIONS":
+        return None
+    if not INTERNAL_API_TOKEN:
+        return None
+    auth = request.headers.get("Authorization", "")
+    if auth != f"Bearer {INTERNAL_API_TOKEN}":
+        return jsonify({"error": "Unauthorized"}), 401
+
+@app.route("/")
+def root():
+    return jsonify({
+        "service": "agent-prospection",
+        "status": "online",
+        "ui": "/ui",
+        "gemini": "ok" if GEMINI_AVAILABLE else "fallback",
+        "model": ACTIVE_MODEL_NAME,
+        "last_error": LAST_GEMINI_ERROR,
+    }), 200
+
+@app.route("/health")
+def health():
+    try:
+        db = SessionLocal()
+        count = db.query(Prospect).count()
+        db.close()
+        return jsonify({
+            "status": "healthy",
+            "database": "ok",
+            "prospects_count": count,
+            "gemini": "ok" if GEMINI_AVAILABLE else "fallback",
+            "model": ACTIVE_MODEL_NAME,
+            "gemini_key_present": bool(GEMINI_API_KEY),
+            "gemini_key_len": len(GEMINI_API_KEY or ""),
+            "last_error": LAST_GEMINI_ERROR,
+            "smtp": "configured" if SMTP_USER else "missing",
+        }), 200
+    except Exception as e:
+        return jsonify({"status": "unhealthy", "error": str(e)}), 500
+
+@app.route("/ui")
+def ui():
+    html = """<!DOCTYPE html>
+<html lang="fr"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent de Prospection</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Arial,sans-serif;background:linear-gradient(135deg,#0f172a,#1e3a5f);min-height:100vh;color:#fff}
+.container{width:min(1000px,calc(100% - 32px));margin:0 auto;padding:32px 0}
+h1{font-size:28px} .sub{color:#dbeafe;margin-top:6px}
+.badge{display:inline-block;margin-top:8px;font-size:12px;padding:4px 10px;border-radius:999px;background:#e2e8f0;color:#334155}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:18px 0}
+.stat{background:rgba(255,255,255,.1);border-radius:12px;padding:16px;text-align:center}
+.stat-value{font-size:28px;font-weight:bold;color:#60a5fa}
+.stat-label{font-size:12px;color:#dbeafe;margin-top:4px}
+.chat-box{background:rgba(255,255,255,.96);border-radius:16px;overflow:hidden;min-height:520px;display:flex;flex-direction:column}
+.chat-header{padding:18px;border-bottom:1px solid #e2e8f0;color:#102a43}
+.chat-header p{color:#64748b;font-size:13px;margin-top:5px}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+.chip{border:1px solid #cbd5e1;background:#f1f5f9;color:#334155;border-radius:999px;padding:6px 10px;font-size:12px;cursor:pointer}
+#messages{flex:1;overflow-y:auto;padding:20px;background:#f8fafc;min-height:340px}
+.message{max-width:80%;margin-bottom:12px;padding:12px 15px;border-radius:12px;line-height:1.5;white-space:pre-wrap;word-wrap:break-word}
+.user-msg{margin-left:auto;background:#2563eb;color:#fff}
+.agent-msg{margin-right:auto;background:#fff;color:#1e293b;border:1px solid #e2e8f0}
+.meta{font-size:11px;color:#94a3b8;margin-top:-6px;margin-bottom:10px}
+.chat-form{display:flex;gap:10px;padding:16px;border-top:1px solid #e2e8f0;background:#fff}
+#prompt{flex:1;padding:12px;border:1px solid #cbd5e1;border-radius:9px;font-size:15px;outline:none;color:#0f172a}
+#send{padding:12px 20px;background:#2563eb;color:#fff;border:none;border-radius:9px;font-weight:bold;cursor:pointer}
+</style></head><body>
+<div class="container">
+  <h1>Agent de Prospection</h1>
+  <p class="sub">Co-pilote multi-sujets — sessions, scripts, objections, ICP</p>
+  <div class="badge" id="ai-status">IA: ...</div>
+  <div class="stats">
+    <div class="stat"><div class="stat-value" id="count-total">0</div><div class="stat-label">Prospects total</div></div>
+    <div class="stat"><div class="stat-value" id="count-new">0</div><div class="stat-label">Nouveaux</div></div>
+    <div class="stat"><div class="stat-value" id="count-contacted">0</div><div class="stat-label">Contactés</div></div>
+  </div>
+  <div class="chat-box">
+    <div class="chat-header">
+      <h2>Assistant de Prospection</h2>
+      <p>Discute librement. Les réponses doivent varier et provenir de Gemini si le badge est vert.</p>
+      <div class="chips">
+        <button type="button" class="chip" data-msg="Prepare une session de prospection de 45 min">Session 45 min</button>
+        <button type="button" class="chip" data-msg="Aide-moi a definir mon ICP">ICP</button>
+        <button type="button" class="chip" data-msg="Redige un cold email percutant">Cold email</button>
+        <button type="button" class="chip" data-msg="Fais un jeu de role client difficile">Jeu de role</button>
+      </div>
+    </div>
+    <div id="messages"></div>
+    <form class="chat-form" id="chat-form">
+      <input id="prompt" type="text" placeholder="Ex: je vends du coaching a des dirigeants RH..." autocomplete="off" required>
+      <button id="send" type="submit">Envoyer</button>
+    </form>
+  </div>
+</div>
+<script>
+const messages=document.getElementById('messages');
+const form=document.getElementById('chat-form');
+const input=document.getElementById('prompt');
+const btn=document.getElementById('send');
+const sessionId=localStorage.getItem('ps_session')||(crypto.randomUUID?crypto.randomUUID():String(Date.now()));
+localStorage.setItem('ps_session',sessionId);
+function addMsg(role,text,meta){
+  const d=document.createElement('div');
+  d.className='message '+(role==='user'?'user-msg':'agent-msg');
+  d.textContent=text; messages.appendChild(d);
+  if(meta){const m=document.createElement('div');m.className='meta';m.textContent=meta;messages.appendChild(m);}
+  messages.scrollTop=messages.scrollHeight;
+}
+async function loadStats(){try{const d=await (await fetch('/api/admin/stats')).json();
+ document.getElementById('count-total').textContent=d.prospects_count||0;
+ document.getElementById('count-new').textContent=d.new_count||0;
+ document.getElementById('count-contacted').textContent=d.contacted_count||0;}catch(e){}}
+async function loadHealth(){try{const d=await (await fetch('/health')).json();const el=document.getElementById('ai-status');
+ if(d.gemini==='ok'){el.textContent='IA: Gemini ON · '+(d.model||'?');el.style.background='#dcfce7';el.style.color='#166534';}
+ else{el.textContent='IA: FALLBACK · '+(d.last_error||'cle/modele KO');el.style.background='#fee2e2';el.style.color='#991b1b';}
+}catch(e){}}
+async function sendMessage(msg){
+ addMsg('user',msg); btn.disabled=true; btn.textContent='...';
+ try{
+  const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg,session_id:sessionId})});
+  const d=await r.json();
+  const meta='engine='+(d.engine||'?')+(d.model?(' · '+d.model):'')+(d.error?(' · err: '+d.error):'');
+  addMsg('agent', d.reply||d.error||'Erreur', meta);
+  loadStats(); loadHealth();
+ }catch(err){addMsg('agent','Erreur de connexion au serveur.');}
+ finally{btn.disabled=false;btn.textContent='Envoyer';input.focus();}
+}
+form.addEventListener('submit',async e=>{e.preventDefault();const msg=input.value.trim();if(!msg)return;input.value='';await sendMessage(msg);});
+document.querySelectorAll('.chip').forEach(c=>c.addEventListener('click',()=>sendMessage(c.getAttribute('data-msg'))));
+addMsg('agent',"Salut ! Je suis ton co-pilote de prospection.\\nDis-moi ton offre + cible, ou clique une suggestion.");
+loadStats(); loadHealth();
+</script></body></html>"""
+    return Response(html, mimetype="text/html")
+
+@app.route("/api/prospects", methods=["POST"])
+def create_prospect():
+    data = request.get_json() or {}
+    email = (data.get("email") or "").strip().lower()
+    if not email:
+        return jsonify({"error": "email requis"}), 400
+    db = SessionLocal()
+    try:
+        existing = db.query(Prospect).filter(Prospect.email == email).first()
+        if existing:
+            return jsonify({"status": "exists", "id": existing.id}), 200
+        p = Prospect(
+            first_name=(data.get("first_name") or "").strip(),
+            last_name=(data.get("last_name") or "").strip(),
+            email=email,
+            company=(data.get("company") or "").strip() or None,
+            job_title=(data.get("job_title") or "").strip() or None,
+            industry=(data.get("industry") or "").strip() or None,
+            country=(data.get("country") or "").strip().upper() or None,
+            status="nouveau",
+            qualification_score=int(data.get("qualification_score") or 50),
+            notes=(data.get("notes") or "").strip() or None,
+        )
+        db.add(p); db.commit(); db.refresh(p)
+        return jsonify({"status": "success", "id": p.id}), 201
+    except Exception as e:
+        db.rollback(); return jsonify({"error": str(e)}), 500
+    finally:
+        db.close()
+
+@app.route("/api/prospects", methods=["GET"])
+def list_prospects():
+    limit = min(int(request.args.get("limit", 50)), 200)
+    db = SessionLocal()
+    try:
+        rows = db.query(Prospect).order_by(Prospect.id.desc()).limit(limit).all()
+        return jsonify({"count": len(rows), "prospects": [
+            {"id": r.id, "first_name": r.first_name, "last_name": r.last_name, "email": r.email,
+             "company": r.company, "status": r.status} for r in rows
+        ]}), 200
+    finally:
+        db.close()
+
+@app.route("/api/prospects/<int:pid>", methods=["DELETE"])
+def delete_prospect(pid):
+    db = SessionLocal()
+    try:
+        p = db.query(Prospect).filter(Prospect.id == pid).first()
+        if not p: return jsonify({"error": "non trouve"}), 404
+        db.delete(p); db.commit()
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        db.rollback(); return jsonify({"error": str(e)}), 500
+    finally:
+        db.close()
+
+@app.route("/api/send-email", methods=["POST"])
+def send_email_route():
+    data = request.get_json() or {}
+    to, subject, body = data.get("to",""), data.get("subject",""), data.get("body","")
+    if not all([to, subject, body]):
+        return jsonify({"error": "to, subject, body requis"}), 400
+    ok = send_email_smtp(to, subject, body)
+    return (jsonify({"status": "success"}), 200) if ok else (jsonify({"error": "echec smtp"}), 500)
+
+@app.route("/api/chat", methods=["POST"])
+def chat():
+    data = request.get_json() or {}
+    message = (data.get("message") or "").strip()
+    session_id = (data.get("session_id") or request.remote_addr or "default").strip()
+    if not message:
+        return jsonify({"error": "message vide"}), 400
+    db = SessionLocal()
+    try:
+        db_context = build_db_context(db)
+        history = CHAT_HISTORY[session_id]
+        reply, meta = ask_gemini(message, db_context, history)
+        history.append({"role": "user", "content": message})
+        history.append({"role": "agent", "content": reply})
+        if len(history) > MAX_HISTORY * 2:
+            CHAT_HISTORY[session_id] = history[-(MAX_HISTORY * 2):]
+        return jsonify({
+            "reply": reply,
+            "engine": meta.get("engine"),
+            "model": meta.get("model"),
+            "error": meta.get("error"),
+            "gemini": "ok" if GEMINI_AVAILABLE else "fallback",
+        }), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        db.close()
+
+@app.route("/api/admin/stats", methods=["GET"])
+def admin_stats():
+    db = SessionLocal()
+    try:
+        total = db.query(Prospect).count()
+        nouveaux = db.query(Prospect).filter(Prospect.status == "nouveau").count()
+        contactes = db.query(Prospect).filter(Prospect.status == "contacté").count()
+        return jsonify({"prospects_count": total, "new_count": nouveaux, "contacted_count": contactes}), 200
+    finally:
+        db.close()
+
+@app.route("/api/admin/chat", methods=["POST"])
+def admin_chat():
+    data = request.get_json() or {}
+    instruction = (data.get("instruction") or data.get("message") or "").strip()
+    session_id = (data.get("session_id") or "admin").strip()
+    if not instruction:
+        return jsonify({"error": "Instruction vide"}), 400
+    db = SessionLocal()
+    try:
+        db_context = build_db_context(db)
+        history = CHAT_HISTORY[session_id]
+        answer, meta = ask_gemini(instruction, db_context, history)
+        history.append({"role": "user", "content": instruction})
+        history.append({"role": "agent", "content": answer})
+        return jsonify({"status": "success", "answer": answer, "reply": answer, **meta}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        db.close()
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "5000"))
+    logger.info(f"Start port={port} gemini={GEMINI_AVAILABLE} model={ACTIVE_MODEL_NAME} err={LAST_GEMINI_ERROR}")
+    app.run(host="0.0.0.0", port=port, debug=False)

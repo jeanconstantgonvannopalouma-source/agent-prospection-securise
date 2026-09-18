@@ -1,16 +1,20 @@
-﻿import os
+import os
+import re
+import json
 import logging
 import smtplib
-import re
 import traceback
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from datetime import datetime, date
+from collections import defaultdict
+
 from flask import Flask, jsonify, Response, request
 from flask_cors import CORS
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, inspect, text
+from sqlalchemy import (
+    create_engine, Column, Integer, String, DateTime, Text, Boolean, inspect, text
+)
 from sqlalchemy.orm import declarative_base, sessionmaker
-from datetime import datetime
-from collections import defaultdict
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("agent")
@@ -18,14 +22,26 @@ logger = logging.getLogger("agent")
 app = Flask(__name__)
 CORS(app)
 
-DATABASE_URL       = os.getenv("DATABASE_URL", "")
+# ===================== ENV =====================
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 INTERNAL_API_TOKEN = os.getenv("INTERNAL_API_TOKEN", "")
-GEMINI_API_KEY     = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip().strip('"').strip("'")
-GEMINI_MODEL_ENV   = (os.getenv("GEMINI_MODEL") or "gemini-2.0-flash").strip()
-SMTP_SERVER        = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT          = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER          = os.getenv("SMTP_USER", "")
-SMTP_PASSWORD      = os.getenv("SMTP_PASSWORD", "")
+GEMINI_API_KEY = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip().strip('"').strip("'")
+GEMINI_MODEL_ENV = (os.getenv("GEMINI_MODEL") or "gemini-flash-latest").strip()
+
+SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = (os.getenv("SMTP_USER") or "").strip()
+SMTP_PASSWORD = (os.getenv("SMTP_PASSWORD") or "").strip()
+
+DRY_RUN = (os.getenv("DRY_RUN", "true").strip().lower() in {"1", "true", "yes", "on"})
+MAX_EMAILS_PER_DAY = int(os.getenv("MAX_EMAILS_PER_DAY", "30"))
+MAX_EMAILS_PER_HOUR = int(os.getenv("MAX_EMAILS_PER_HOUR", "5"))
+REQUIRE_CONFIRMATION_ABOVE = int(os.getenv("REQUIRE_CONFIRMATION_ABOVE", "3"))
+EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "Jean Constant Gonvanno Palouma")
+EMAIL_SIGNATURE = os.getenv("EMAIL_SIGNATURE", "Jean Constant Gonvanno Palouma\n+33 6 20 07 81 93").replace("\\n", "\n")
+
+EMAIL_WHITELIST = [e.strip().lower() for e in (os.getenv("EMAIL_WHITELIST") or "").split(",") if e.strip()]
+EMAIL_BLACKLIST = [e.strip().lower() for e in (os.getenv("EMAIL_BLACKLIST") or "").split(",") if e.strip()]
 
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
@@ -37,82 +53,40 @@ engine = create_engine(DATABASE_URL, echo=False, pool_pre_ping=True, connect_arg
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
 Base = declarative_base()
 
+# ===================== GEMINI BOOT LIGHT (non bloquant) =====================
+GEMINI_AVAILABLE = False
+ACTIVE_MODEL_NAME = None
+LAST_GEMINI_ERROR = None
+genai = None
+try:
+    import google.generativeai as genai
+    _key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip().strip('"').strip("'")
+    _model = (os.getenv("GEMINI_MODEL") or "gemini-flash-lite-latest").strip()
+    if not _key:
+        LAST_GEMINI_ERROR = "GEMINI_API_KEY manquante"
+        logger.warning(LAST_GEMINI_ERROR)
+    else:
+        genai.configure(api_key=_key)
+        # Pas d appel reseau au boot (evite freeze 429/404/timeout)
+        ACTIVE_MODEL_NAME = _model
+        GEMINI_AVAILABLE = True
+        LAST_GEMINI_ERROR = None
+        logger.info("Gemini pret (lazy). Modele preferentiel: %s" % _model)
+except Exception as e:
+    LAST_GEMINI_ERROR = "%s: %s" % (type(e).__name__, e)
+    logger.error(LAST_GEMINI_ERROR)
+# ===================== END GEMINI BOOT LIGHT =====================
+
+
 CHAT_HISTORY = defaultdict(list)
-MAX_HISTORY = 16
+MAX_HISTORY = 20
 
 GEMINI_AVAILABLE = False
 ACTIVE_MODEL_NAME = None
 LAST_GEMINI_ERROR = None
 genai = None
 
-try:
-    import google.generativeai as genai
-    if GEMINI_API_KEY:
-        genai.configure(api_key=GEMINI_API_KEY)
-        candidates = []
-        # 1) modele force via env
-        if GEMINI_MODEL_ENV:
-            candidates.append(GEMINI_MODEL_ENV)
-        # 2) modeles modernes (plus de gemini-pro legacy)
-        candidates += [
-            "gemini-2.0-flash",
-            "gemini-2.0-flash-001",
-            "gemini-2.5-flash",
-            "gemini-flash-latest",
-            "gemini-1.5-flash",
-            "gemini-1.5-flash-latest",
-            "gemini-1.5-flash-001",
-            "gemini-1.5-pro",
-            "gemini-1.5-pro-latest",
-        ]
-        # 3) modeles dynamiques exposes par l API
-        try:
-            for m in genai.list_models():
-                methods = list(getattr(m, "supported_generation_methods", []) or [])
-                if "generateContent" in methods:
-                    short = (getattr(m, "name", "") or "").replace("models/", "")
-                    if short:
-                        candidates.append(short)
-        except Exception as e:
-            logger.warning(f"list_models impossible: {e}")
-
-        seen = set()
-        models_to_try = []
-        for n in candidates:
-            n = (n or "").strip()
-            if not n or n in seen:
-                continue
-            # ignorer explicitement les modeles morts
-            if n in {"gemini-pro", "gemini-1.0-pro", "chat-bison-001"}:
-                continue
-            seen.add(n)
-            models_to_try.append(n)
-
-        for name in models_to_try:
-            try:
-                m = genai.GenerativeModel(name)
-                r = m.generate_content("Reponds un mot: OK")
-                txt = (getattr(r, "text", None) or "").strip()
-                if txt:
-                    ACTIVE_MODEL_NAME = name
-                    GEMINI_AVAILABLE = True
-                    LAST_GEMINI_ERROR = None
-                    logger.info(f"Gemini OK smoke-test: {name} -> {txt[:40]}")
-                    break
-                else:
-                    logger.warning(f"Modele {name} reponse vide au smoke-test")
-            except Exception as e:
-                LAST_GEMINI_ERROR = f"{type(e).__name__}: {e}"
-                logger.warning(f"Modele {name} fail: {LAST_GEMINI_ERROR}")
-        if not GEMINI_AVAILABLE:
-            logger.error(f"Aucun modele Gemini utilisable. Derniere erreur: {LAST_GEMINI_ERROR}")
-    else:
-        LAST_GEMINI_ERROR = "GEMINI_API_KEY manquante"
-        logger.warning(LAST_GEMINI_ERROR)
-except Exception as e:
-    LAST_GEMINI_ERROR = f"Import/config: {type(e).__name__}: {e}"
-    logger.error(LAST_GEMINI_ERROR)
-
+# ===================== DB MODELS =====================
 class Prospect(Base):
     __tablename__ = "prospects"
     id = Column(Integer, primary_key=True)
@@ -120,6 +94,7 @@ class Prospect(Base):
     last_name = Column(String(100), nullable=False, default="")
     email = Column(String(255), nullable=False, unique=True)
     company = Column(String(255), nullable=True)
+    company_name = Column(String(255), nullable=True)
     job_title = Column(String(150), nullable=True)
     industry = Column(String(100), nullable=True)
     country = Column(String(2), nullable=True)
@@ -129,85 +104,872 @@ class Prospect(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
+
+class KnowledgeBase(Base):
+    __tablename__ = "knowledge_base"
+    id = Column(Integer, primary_key=True)
+    key = Column(String(100), unique=True, nullable=False)
+    data_json = Column(Text, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+class Activity(Base):
+    __tablename__ = "activities"
+    id = Column(Integer, primary_key=True)
+    prospect_id = Column(Integer, nullable=True)
+    email_to = Column(String(255), nullable=True)
+    channel = Column(String(50), default="email")  # email | linkedin | system
+    action = Column(String(50), default="send_email")  # draft_email | send_email | status_update | note
+    subject = Column(String(500), nullable=True)
+    body = Column(Text, nullable=True)
+    status = Column(String(50), default="draft")  # draft | sent | failed | dry_run | blocked
+    meta_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 def ensure_schema():
     insp = inspect(engine)
-    if not insp.has_table("prospects"):
-        Base.metadata.create_all(engine)
-        return
-    cols = {c["name"] for c in insp.get_columns("prospects")}
-    for col, typ in [
-        ("company","VARCHAR(255)"),("job_title","VARCHAR(150)"),
-        ("industry","VARCHAR(100)"),("country","VARCHAR(2)"),
-        ("status","VARCHAR(50)"),("qualification_score","INTEGER"),
-        ("notes","TEXT"),("created_at","TIMESTAMP"),("updated_at","TIMESTAMP")
-    ]:
-        if col not in cols:
-            with engine.connect() as conn:
-                conn.execute(text(f"ALTER TABLE prospects ADD COLUMN {col} {typ}"))
-                conn.commit()
     Base.metadata.create_all(engine)
+    if insp.has_table("prospects"):
+        cols = {c["name"] for c in insp.get_columns("prospects")}
+        for col, typ in [
+            ("company", "VARCHAR(255)"), ("job_title", "VARCHAR(150)"),
+            ("industry", "VARCHAR(100)"), ("country", "VARCHAR(2)"),
+            ("status", "VARCHAR(50)"), ("qualification_score", "INTEGER"),
+            ("notes", "TEXT"), ("created_at", "TIMESTAMP"), ("updated_at", "TIMESTAMP"),
+        ]:
+            if col not in cols:
+                with engine.connect() as conn:
+                    conn.execute(text(f"ALTER TABLE prospects ADD COLUMN {col} {typ}"))
+                    conn.commit()
 
 ensure_schema()
 
-SYSTEM_PROMPT = """Tu es un co-pilote de prospection elite (coach commercial + copywriter + stratege).
-Tu travailles AVEC l'utilisateur sur N'IMPORTE quelle offre / cible / marche.
-Pas de catalogue produit fixe. Pas de phrase d'accueil repetitive.
+# ===================== GEMINI BOOT =====================
+try:
+    import google.generativeai as genai
+    if GEMINI_API_KEY:
+        genai.configure(api_key=GEMINI_API_KEY)
+        candidates = []
+        # free fallbacks from env
+        free_fb = [x.strip() for x in (os.getenv("GEMINI_FREE_FALLBACKS") or "").split(",") if x.strip()]
+        if GEMINI_MODEL_ENV:
+            candidates.append(GEMINI_MODEL_ENV)
+        candidates += free_fb
+        candidates += [
+            "gemini-2.0-flash-lite",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash-8b",
+            "gemini-1.5-flash",
+            "gemini-1.5-flash-latest",
+            "gemini-1.5-pro",
+            "gemma-3-4b-it",
+            "gemma-3-12b-it",
+        ]
+        # ne pas prioriser les alias satures
+        # (ils peuvent etre testes en dernier seulement)
+        candidates += ["gemini-flash-latest"]
+        try:
+            for m in genai.list_models():
+                methods = list(getattr(m, "supported_generation_methods", []) or [])
+                if "generateContent" in methods:
+                    short = (getattr(m, "name", "") or "").replace("models/", "")
+                    if short:
+                        candidates.append(short)
+        except Exception as e:
+            logger.warning(f"list_models: {e}")
 
-Regles:
-- Francais naturel, direct, utile
-- Si message vague (salut/discuter): reponds humainement, propose 3 pistes, pose 1 question
-- Si brief clair: livre un deliverable concret (ICP, email, plan de session, script...)
-- Ne repete jamais le meme message
-- Utilise le contexte prospects s'il est pertinent
-"""
+        seen = set()
+        for name in candidates:
+            name = (name or "").strip()
+            if not name or name in seen or name in {"gemini-pro", "gemini-1.0-pro"}:
+                continue
+            seen.add(name)
+            try:
+                m = genai.GenerativeModel(name)
+                r = type("R", (), {"text": "OK"})()  # boot non bloquant
+                txt = (getattr(r, "text", None) or "").strip()
+                if txt:
+                    ACTIVE_MODEL_NAME = name
+                    GEMINI_AVAILABLE = True
+                    LAST_GEMINI_ERROR = None
+                    logger.info(f"Gemini OK: {name}")
+                    break
+            except Exception as e:
+                LAST_GEMINI_ERROR = f"{type(e).__name__}: {e}"
+                logger.warning(f"Model fail {name}: {LAST_GEMINI_ERROR}")
+        if not GEMINI_AVAILABLE:
+            logger.error(f"Aucun modele OK: {LAST_GEMINI_ERROR}")
+    else:
+        LAST_GEMINI_ERROR = "GEMINI_API_KEY manquante"
+except Exception as e:
+    LAST_GEMINI_ERROR = f"Import/config: {type(e).__name__}: {e}"
+    logger.error(LAST_GEMINI_ERROR)
+
+# ===================== HELPERS =====================
+
+def now_utc():
+    return datetime.utcnow()
+
+def append_signature(body: str) -> str:
+    body = (body or "").rstrip()
+    sig = (EMAIL_SIGNATURE or "").strip()
+    if not sig:
+        return body
+    if sig in body:
+        return body
+    return f"{body}\n\n--\n{sig}"
+
+def count_emails(db, hours=None):
+    q = db.query(Activity).filter(
+        Activity.channel == "email",
+        Activity.action == "send_email",
+        Activity.status.in_(["sent", "dry_run"]),
+    )
+    if hours is None:
+        start = datetime.combine(date.today(), datetime.min.time())
+    else:
+        start = now_utc().replace(microsecond=0)
+        # approx: filter last N hours using created_at >= now- hours
+        from datetime import timedelta
+        start = now_utc() - timedelta(hours=hours)
+    q = q.filter(Activity.created_at >= start)
+    return q.count()
+
+def log_activity(db, **kwargs):
+    a = Activity(
+        prospect_id=kwargs.get("prospect_id"),
+        email_to=(kwargs.get("email_to") or None),
+        channel=kwargs.get("channel", "email"),
+        action=kwargs.get("action", "send_email"),
+        subject=kwargs.get("subject"),
+        body=kwargs.get("body"),
+        status=kwargs.get("status", "draft"),
+        meta_json=json.dumps(kwargs.get("meta") or {}, ensure_ascii=False),
+        created_at=now_utc(),
+    )
+    db.add(a)
+    db.commit()
+    db.refresh(a)
+    return a
+
+def prospect_to_dict(p):
+    return {
+        "id": p.id,
+        "first_name": p.first_name,
+        "last_name": p.last_name,
+        "email": p.email,
+        "company": p.company,
+        "job_title": p.job_title,
+        "industry": p.industry,
+        "status": p.status,
+        "qualification_score": p.qualification_score,
+        "notes": p.notes,
+    }
 
 def build_db_context(db):
     count = db.query(Prospect).count()
     nouveaux = db.query(Prospect).filter(Prospect.status == "nouveau").count()
     contactes = db.query(Prospect).filter(Prospect.status == "contacté").count()
+    sent_today = count_emails(db, hours=None)
     derniers = db.query(Prospect).order_by(Prospect.id.desc()).limit(8).all()
     liste = "\n".join([
         f"- ID:{p.id} | {p.first_name} {p.last_name} | {p.email} | {p.company or '-'} | {p.status}"
         for p in derniers
     ]) or "(aucun prospect)"
-    return f"Prospects: {count} total | {nouveaux} nouveaux | {contactes} contactes\n{liste}"
-
-def smart_fallback(user_message: str, history: list, db_context: str) -> str:
-    msg = (user_message or "").strip().lower()
-    if re.search(r"\b(salut|bonjour|hello|hey|coucou)\b", msg) and len(msg) < 50:
-        return (
-            "Salut ! Content de te lire.\n\n"
-            "On peut enchaîner direct sur:\n"
-            "1) définir ta cible (ICP)\n"
-            "2) écrire un cold email / LinkedIn\n"
-            "3) préparer une session de prospection 45 min\n\n"
-            "Tu préfères laquelle, et tu vends quoi en une phrase ?"
-        )
-    if any(x in msg for x in ["discut", "parler", "bavarder", "ensemble"]):
-        return (
-            "Ok, mode discussion utile.\n\n"
-            "Balance juste 3 trucs:\n"
-            "- ton offre\n- ta cible\n- ton frein du moment (message, volume, peur du cold, pricing...)\n\n"
-            "Je m'adapte et on construit la suite ensemble."
-        )
-    if any(x in msg for x in ["email", "cold", "linkedin", "script", "relance"]):
-        return (
-            "Je te rédige le message. Envoie:\n"
-            "offre / cible / canal (email ou LinkedIn) / ton souhaité / 1 preuve si tu as.\n"
-            "Je te sors version longue + courte + accroche."
-        )
-    if any(x in msg for x in ["session", "prépare", "prepare", "prospection", "campagne"]):
-        return (
-            "Prep session — donne-moi: offre + cible + temps dispo.\n"
-            "Je te sors: objectif, ICP, angle, scripts, objections, plan minute par minute."
-        )
-    if any(x in msg for x in ["prospect", "base", "liste"]):
-        return f"Voici ta base:\n{db_context}\n\nOn priorise qui, et on écrit quoi ?"
+    kb_offer = get_kb_item(db, "active_offer")
+    kb_str = f"FICHE OFFRE EN MEMOIRE: Nom={kb_offer.get('offer_name','Non définie')} | Cible={kb_offer.get('target_icp','Non définie')} | Prix={kb_offer.get('price','-')} | Douleurs={kb_offer.get('pain_points','-')}" if kb_offer else "Aucune fiche offre mémorisée."
     return (
-        f"Compris: « {user_message} ».\n\n"
-        "Pour te livrer quelque chose de précis, ajoute offre + cible + objectif (rdv/vente/demo).\n"
-        f"Contexte base:\n{db_context}"
+        f"{kb_str}\n"
+        f"Prospects: {count} total | {nouveaux} nouveaux | {contactes} contactes\n"
+        f"Emails aujourd'hui: {sent_today}/{MAX_EMAILS_PER_DAY} | DRY_RUN={DRY_RUN}\n"
+        f"Derniers:\n{liste}"
     )
+
+# ===================== TOOLS =====================
+
+def tool_create_prospect(db, first_name="", last_name="", email="", company="", job_title="", industry="", country="", notes="", qualification_score=50):
+    email = (email or "").strip().lower()
+    if not email:
+        return {"error": "email requis"}
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+        return {"error": "email invalide"}
+
+    existing = db.query(Prospect).filter(Prospect.email == email).first()
+    if existing:
+        return {
+            "ok": True,
+            "status": "exists",
+            "message": "Prospect deja present",
+            "prospect": prospect_to_dict(existing),
+        }
+
+    company_val = (company or "").strip() or "N/A"
+    first_name = (first_name or "").strip() or "Prenom"
+    last_name = (last_name or "").strip() or "Nom"
+
+    kwargs = dict(
+        first_name=first_name or "Prenom",
+        last_name=last_name or "Nom",
+        email=email,
+        company=company_val,
+        job_title=(job_title or "").strip() or "N/A",
+        industry=(industry or "").strip() or "N/A",
+        country=(country or "").strip().upper() or "FR",
+        status="nouveau",
+        qualification_score=int(qualification_score or 50),
+        notes=(notes or "").strip() or "",
+    )
+    # compat anciennes bases avec company_name
+    if hasattr(Prospect, "company_name"):
+        kwargs["company_name"] = company_val
+
+    p = Prospect(**kwargs)
+    db.add(p)
+    db.commit()
+    db.refresh(p)
+
+    log_activity(
+        db,
+        prospect_id=p.id,
+        email_to=p.email,
+        channel="system",
+        action="create_prospect",
+        subject=f"Nouveau prospect: {p.first_name} {p.last_name}",
+        body=notes or "",
+        status="done",
+        meta={"email": p.email, "company": company_val},
+    )
+    return {
+        "ok": True,
+        "status": "created",
+        "message": "Prospect cree avec succes",
+        "prospect": prospect_to_dict(p),
+    }
+
+
+
+
+def tool_delete_prospect(db, prospect_id=None, email=None, confirm=True):
+    """Supprime un prospect par id ou email. confirm=True par defaut."""
+    p = None
+    if prospect_id is not None and str(prospect_id).strip() != "":
+        try:
+            p = db.query(Prospect).filter(Prospect.id == int(prospect_id)).first()
+        except Exception:
+            return {"ok": False, "error": "prospect_id invalide"}
+    elif email:
+        p = db.query(Prospect).filter(Prospect.email == str(email).strip().lower()).first()
+    else:
+        return {"ok": False, "error": "fournis prospect_id ou email"}
+
+    if not p:
+        return {"ok": False, "error": "Prospect introuvable"}
+
+    if confirm is False or str(confirm).lower() in {"false", "0", "no", "non"}:
+        return {
+            "ok": False,
+            "status": "confirmation_required",
+            "message": "Prospect trouve. Rappelle delete_prospect avec confirm=true pour supprimer.",
+            "prospect": prospect_to_dict(p),
+        }
+
+    info = prospect_to_dict(p)
+    pid = p.id
+    email_to = p.email
+    db.delete(p)
+    db.commit()
+
+    try:
+        log_activity(
+            db,
+            prospect_id=pid,
+            email_to=email_to,
+            channel="system",
+            action="delete_prospect",
+            subject="Prospect supprime",
+            body=str(info),
+            status="done",
+            meta={"deleted": info},
+        )
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "status": "deleted",
+        "message": "Prospect supprime avec succes",
+        "deleted": info,
+    }
+
+
+# ===================== PHASE 2 SEQUENCES =====================
+def _seq_render(txt, prospect=None):
+    data = {
+        "first_name": "la",
+        "last_name": "",
+        "company": "votre entreprise",
+        "job_title": "votre poste",
+        "industry": "",
+        "email": "",
+    }
+    if prospect is not None:
+        if isinstance(prospect, dict):
+            for k in data:
+                if prospect.get(k):
+                    data[k] = prospect.get(k)
+        else:
+            for k in data:
+                val = getattr(prospect, k, None)
+                if val:
+                    data[k] = val
+    out = txt or ""
+    for k, v in data.items():
+        out = out.replace("{" + k + "}", str(v))
+    return out
+
+
+
+def get_kb_item(db, key):
+    item = db.query(KnowledgeBase).filter(KnowledgeBase.key == key).first()
+    if item and item.data_json:
+        try:
+            return json.loads(item.data_json)
+        except Exception:
+            return {}
+    return {}
+
+def set_kb_item(db, key, data_dict):
+    item = db.query(KnowledgeBase).filter(KnowledgeBase.key == key).first()
+    if not item:
+        item = KnowledgeBase(key=key, data_json=json.dumps(data_dict, ensure_ascii=False))
+        db.add(item)
+    else:
+        item.data_json = json.dumps(data_dict, ensure_ascii=False)
+        item.updated_at = datetime.utcnow()
+    db.commit()
+
+def tool_save_offer_icp(db, offer_name="", offer_desc="", price="", target_icp="", pain_points="", objections=""):
+    """Enregistre ou met a jour la fiche offre et ICP dans la memoire long terme."""
+    current = get_kb_item(db, "active_offer")
+    data = {
+        "offer_name": offer_name or current.get("offer_name") or "Offre Principale",
+        "offer_desc": offer_desc or current.get("offer_desc") or "",
+        "price": price or current.get("price") or "",
+        "target_icp": target_icp or current.get("target_icp") or "",
+        "pain_points": pain_points or current.get("pain_points") or "",
+        "objections": objections or current.get("objections") or "",
+    }
+    set_kb_item(db, "active_offer", data)
+    try:
+        log_activity(db, channel="system", action="save_memory", subject=f"Fiche Offre Mémorisée: {data['offer_name']}", status="done")
+    except Exception:
+        pass
+    return {"ok": True, "message": "Fiche Offre et ICP mémorisées dans la base long terme !", "data": data}
+
+def tool_get_offer_icp(db):
+    """Recupere la fiche offre et ICP actuellement memorisee."""
+    data = get_kb_item(db, "active_offer")
+    return {"ok": True, "active_offer": data or "Aucune offre enregistrée pour le moment."}
+
+
+def tool_generate_sequence(db, offer="", target="", channel="both", steps_count=4, tone="pro"):
+    """Genere une sequence multi-etapes Email + LinkedIn (textes prets a l emploi)."""
+    offer = (offer or "votre offre").strip()
+    target = (target or "votre cible").strip()
+    steps_count = max(1, min(int(steps_count or 4), 6))
+    channel = (channel or "both").lower()
+
+    # Structure de base
+    sequence = []
+
+    # LinkedIn invitation (si both/linkedin)
+    if channel in ("both", "linkedin"):
+        sequence.append({
+            "step": len(sequence) + 1,
+            "day": "J+0",
+            "channel": "linkedin",
+            "type": "invitation",
+            "goal": "Connexion",
+            "message": (
+                "Bonjour {first_name}, j echange souvent avec des profils {job_title}. "
+                "OK pour se connecter ? J ai une idee courte liee a " + offer + " pour des structures comme {company}."
+            ),
+        })
+        sequence.append({
+            "step": len(sequence) + 1,
+            "day": "J+1",
+            "channel": "linkedin",
+            "type": "message",
+            "goal": "Ouverture discussion",
+            "message": (
+                "Merci pour la connexion {first_name} ! "
+                "En 2 lignes : j aide " + target + " sur " + offer + ". "
+                "Ca vous parle pour {company} ?"
+            ),
+        })
+
+    # Emails
+    if channel in ("both", "email"):
+        sequence.append({
+            "step": len(sequence) + 1,
+            "day": "J+0" if channel == "email" else "J+0",
+            "channel": "email",
+            "type": "prise_de_contact",
+            "goal": "Accroche + demande de creneau",
+            "subject": "{first_name}, une idee rapide pour {company}",
+            "body": (
+                "Bonjour {first_name},\n\n"
+                "En regardant {company}, j ai pense a une piste simple autour de : " + offer + ".\n\n"
+                "Pour les " + target + ", ca se traduit souvent par un gain de temps et plus de clarte commercialement.\n\n"
+                "Seriez-vous ouvert a un echange de 15 minutes cette semaine ?\n\n"
+                "Bien a vous,"
+            ),
+        })
+        sequence.append({
+            "step": len(sequence) + 1,
+            "day": "J+3",
+            "channel": "email",
+            "type": "valeur",
+            "goal": "Preuve / angle concret",
+            "subject": "Re: idee pour {company}",
+            "body": (
+                "Bonjour {first_name},\n\n"
+                "Petit complement a mon message : sur des contextes proches de {job_title}, "
+                "l angle le plus efficace sur " + offer + " est souvent une premiere etape tres simple (diagnostic 15 min).\n\n"
+                "Si utile, je vous envoie 3 points d action adaptes a {company}.\n\n"
+                "Ca vous dit ?\n\nBien a vous,"
+            ),
+        })
+        sequence.append({
+            "step": len(sequence) + 1,
+            "day": "J+7",
+            "channel": "email",
+            "type": "relance",
+            "goal": "Relance courte",
+            "subject": "{first_name}, je me permets un court suivi",
+            "body": (
+                "Bonjour {first_name},\n\n"
+                "Je me permets un court suivi concernant " + offer + " pour {company}.\n\n"
+                "Toujours d actualite de votre cote ?\n\nBien a vous,"
+            ),
+        })
+        sequence.append({
+            "step": len(sequence) + 1,
+            "day": "J+12",
+            "channel": "email",
+            "type": "rupture",
+            "goal": "Break-up",
+            "subject": "Je clos le sujet de mon cote ({company})",
+            "body": (
+                "Bonjour {first_name},\n\n"
+                "Je ne veux pas polluer votre boite mail.\n"
+                "Si le sujet n est pas prioritaire pour {company}, je clos le fil de mon cote.\n\n"
+                "Si un jour vous voulez en reparler, je suis dispo.\n\nBien a vous,"
+            ),
+        })
+
+    sequence = sequence[:steps_count]
+
+    # Log activite systeme
+    try:
+        log_activity(
+            db,
+            prospect_id=None,
+            email_to=None,
+            channel="system",
+            action="generate_sequence",
+            subject=("Sequence %s -> %s" % (offer, target))[:180],
+            body=str(sequence)[:3000],
+            status="draft",
+            meta={"offer": offer, "target": target, "channel": channel, "steps": len(sequence)},
+        )
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "offer": offer,
+        "target": target,
+        "channel": channel,
+        "tone": tone,
+        "variables": ["{first_name}", "{last_name}", "{company}", "{job_title}", "{industry}", "{email}"],
+        "steps_count": len(sequence),
+        "sequence": sequence,
+        "how_to_use": "Utilise apply_sequence_step1 pour envoyer/simuler l etape email 1 a un prospect. LinkedIn = copie-colle manuelle pour l instant.",
+    }
+
+
+def tool_apply_sequence_step1(db, prospect_id=None, email=None, offer="", target="", send=True):
+    """Personnalise et (dry_run/live) envoie la 1ere etape EMAIL d une sequence."""
+    p = None
+    if prospect_id:
+        p = db.query(Prospect).filter(Prospect.id == int(prospect_id)).first()
+    elif email:
+        p = db.query(Prospect).filter(Prospect.email == str(email).strip().lower()).first()
+    if not p:
+        return {"ok": False, "error": "Prospect introuvable"}
+
+    seq = tool_generate_sequence(db, offer=offer or "votre offre", target=target or "votre cible", channel="email", steps_count=4)
+    email_steps = [s for s in seq.get("sequence", []) if s.get("channel") == "email"]
+    if not email_steps:
+        return {"ok": False, "error": "Aucune etape email dans la sequence"}
+
+    step1 = email_steps[0]
+    subject = _seq_render(step1.get("subject", ""), p)
+    body = _seq_render(step1.get("body", ""), p)
+
+    # mark prospect
+    try:
+        p.status = "en_sequence"
+        note = "[sequence] step1 prepare (%s)" % (offer or "offre")
+        p.notes = ((p.notes or "") + "\n" + note).strip()
+        p.updated_at = datetime.utcnow() if hasattr(datetime, "utcnow") else datetime.now()
+        db.commit()
+    except Exception:
+        db.rollback()
+
+    if not send:
+        d = tool_draft_email(db, to_email=p.email, subject=subject, body=body, prospect_id=p.id)
+        return {"ok": True, "mode": "draft", "prospect": prospect_to_dict(p), "step": step1, "draft": d}
+
+    res = tool_send_email(db, to_email=p.email, subject=subject, body=body, prospect_id=p.id)
+    return {
+        "ok": bool(res.get("ok") or res.get("status") in ("dry_run", "sent")),
+        "mode": res.get("status"),
+        "prospect": prospect_to_dict(p),
+        "step": step1,
+        "send_result": res,
+    }
+# ===================== END PHASE 2 SEQUENCES =====================
+
+
+def tool_list_prospects(db, status=None, limit=20):
+    limit = max(1, min(int(limit or 20), 100))
+    q = db.query(Prospect).order_by(Prospect.id.desc())
+    if status:
+        q = q.filter(Prospect.status == status)
+    rows = q.limit(limit).all()
+    return {"count": len(rows), "prospects": [prospect_to_dict(p) for p in rows]}
+
+def tool_get_prospect(db, prospect_id=None, email=None):
+    p = None
+    if prospect_id:
+        p = db.query(Prospect).filter(Prospect.id == int(prospect_id)).first()
+    elif email:
+        p = db.query(Prospect).filter(Prospect.email == email.strip().lower()).first()
+    if not p:
+        return {"error": "Prospect introuvable"}
+    return {"prospect": prospect_to_dict(p)}
+
+def tool_search_prospects(db, query="", limit=20):
+    query = (query or "").strip().lower()
+    limit = max(1, min(int(limit or 20), 100))
+    rows = db.query(Prospect).order_by(Prospect.id.desc()).limit(300).all()
+    out = []
+    for p in rows:
+        blob = f"{p.first_name} {p.last_name} {p.email} {p.company} {p.job_title} {p.notes}".lower()
+        if query in blob:
+            out.append(prospect_to_dict(p))
+        if len(out) >= limit:
+            break
+    return {"count": len(out), "prospects": out}
+
+def tool_update_prospect_status(db, status, prospect_id=None, email=None, notes=None):
+    p = None
+    if prospect_id:
+        p = db.query(Prospect).filter(Prospect.id == int(prospect_id)).first()
+    elif email:
+        p = db.query(Prospect).filter(Prospect.email == email.strip().lower()).first()
+    if not p:
+        return {"error": "Prospect introuvable"}
+    p.status = status
+    if notes:
+        p.notes = ((p.notes or "") + "\n[" + datetime.utcnow().isoformat()[:10] + "] " + str(notes)).strip()
+    p.updated_at = now_utc()
+    db.commit()
+    log_activity(
+        db,
+        prospect_id=p.id,
+        email_to=p.email,
+        channel="system",
+        action="status_update",
+        subject=f"status -> {status}",
+        body=notes or "",
+        status="done",
+        meta={"status": status},
+    )
+    return {"ok": True, "prospect": prospect_to_dict(p)}
+
+def tool_draft_email(db, to_email, subject, body, prospect_id=None):
+    to_email = (to_email or "").strip().lower()
+    subject = (subject or "").strip()
+    body = append_signature(body or "")
+    if not to_email or not subject or not body:
+        return {"error": "to_email, subject, body requis"}
+    a = log_activity(
+        db,
+        prospect_id=prospect_id,
+        email_to=to_email,
+        channel="email",
+        action="draft_email",
+        subject=subject,
+        body=body,
+        status="draft",
+    )
+    return {
+        "ok": True,
+        "draft_id": a.id,
+        "to": to_email,
+        "subject": subject,
+        "body": body,
+        "note": "Brouillon cree. Utilise send_email pour envoyer.",
+    }
+
+def _can_send(db, to_email):
+    to_email = (to_email or "").strip().lower()
+    if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", to_email):
+        return False, "Email invalide"
+    if EMAIL_BLACKLIST and to_email in EMAIL_BLACKLIST:
+        return False, "Email blacklisté"
+    if EMAIL_WHITELIST and to_email not in EMAIL_WHITELIST:
+        return False, "Email hors whitelist (active seulement si EMAIL_WHITELIST non vide)"
+    if count_emails(db, hours=None) >= MAX_EMAILS_PER_DAY:
+        return False, f"Quota journalier atteint ({MAX_EMAILS_PER_DAY}/jour)"
+    if count_emails(db, hours=1) >= MAX_EMAILS_PER_HOUR:
+        return False, f"Quota horaire atteint ({MAX_EMAILS_PER_HOUR}/heure)"
+    if not SMTP_USER or not SMTP_PASSWORD:
+        return False, "SMTP_USER/SMTP_PASSWORD manquants"
+    return True, "ok"
+
+def send_email_smtp(to_email: str, subject: str, body: str) -> tuple[bool, str]:
+    try:
+        msg = MIMEMultipart()
+        msg["From"] = f"{EMAIL_FROM_NAME} <{SMTP_USER}>" if EMAIL_FROM_NAME else SMTP_USER
+        msg["To"] = to_email
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.send_message(msg)
+        return True, "sent"
+    except Exception as e:
+        logger.error(f"SMTP error: {e}")
+        return False, str(e)
+
+def tool_send_email(db, to_email, subject, body, prospect_id=None, force=False, confirm_batch=False):
+    to_email = (to_email or "").strip().lower()
+    subject = (subject or "").strip()
+    body = append_signature(body or "")
+
+    ok, reason = _can_send(db, to_email)
+    if not ok and "whitelist" not in reason:
+        # whitelist only blocks if configured; other reasons hard block
+        if "whitelist" in reason and not EMAIL_WHITELIST:
+            pass
+        else:
+            a = log_activity(
+                db, prospect_id=prospect_id, email_to=to_email, channel="email",
+                action="send_email", subject=subject, body=body, status="blocked",
+                meta={"reason": reason}
+            )
+            return {"ok": False, "status": "blocked", "reason": reason, "activity_id": a.id}
+
+    # DRY RUN
+    if DRY_RUN and not force:
+        a = log_activity(
+            db, prospect_id=prospect_id, email_to=to_email, channel="email",
+            action="send_email", subject=subject, body=body, status="dry_run",
+            meta={"dry_run": True}
+        )
+        # update prospect status lightly
+        p = None
+        if prospect_id:
+            p = db.query(Prospect).filter(Prospect.id == int(prospect_id)).first()
+        if not p:
+            p = db.query(Prospect).filter(Prospect.email == to_email).first()
+        if p and p.status == "nouveau":
+            p.status = "contacté"
+            p.updated_at = now_utc()
+            db.commit()
+        return {
+            "ok": True,
+            "status": "dry_run",
+            "activity_id": a.id,
+            "to": to_email,
+            "subject": subject,
+            "body": body,
+            "message": "SIMULATION ONLY (DRY_RUN=true). Aucun email reel envoye.",
+        }
+
+    # LIVE send
+    success, info = send_email_smtp(to_email, subject, body)
+    status = "sent" if success else "failed"
+    a = log_activity(
+        db, prospect_id=prospect_id, email_to=to_email, channel="email",
+        action="send_email", subject=subject, body=body, status=status,
+        meta={"info": info, "dry_run": False}
+    )
+    if success:
+        p = None
+        if prospect_id:
+            p = db.query(Prospect).filter(Prospect.id == int(prospect_id)).first()
+        if not p:
+            p = db.query(Prospect).filter(Prospect.email == to_email).first()
+        if p:
+            p.status = "contacté"
+            p.updated_at = now_utc()
+            db.commit()
+    return {
+        "ok": success,
+        "status": status,
+        "activity_id": a.id,
+        "to": to_email,
+        "subject": subject,
+        "info": info,
+    }
+
+def tool_list_activities(db, limit=20):
+    limit = max(1, min(int(limit or 20), 100))
+    rows = db.query(Activity).order_by(Activity.id.desc()).limit(limit).all()
+    return {
+        "count": len(rows),
+        "activities": [
+            {
+                "id": a.id,
+                "email_to": a.email_to,
+                "channel": a.channel,
+                "action": a.action,
+                "subject": a.subject,
+                "status": a.status,
+                "created_at": a.created_at.isoformat() if a.created_at else None,
+            }
+            for a in rows
+        ],
+    }
+
+def tool_get_send_stats(db):
+    return {
+        "dry_run": DRY_RUN,
+        "sent_or_simulated_today": count_emails(db, hours=None),
+        "max_per_day": MAX_EMAILS_PER_DAY,
+        "last_hour": count_emails(db, hours=1),
+        "max_per_hour": MAX_EMAILS_PER_HOUR,
+        "smtp_configured": bool(SMTP_USER and SMTP_PASSWORD),
+    }
+
+TOOLS_SPEC = """
+Tu as acces aux OUTILS suivants. Quand tu as besoin d'agir, reponds UNIQUEMENT avec un JSON valide:
+{
+  "tool": "nom_outil",
+  "args": { ... }
+}
+
+Outils disponibles:
+1) list_prospects
+1b) delete_prospect args: {"prospect_id":1, "confirm":true} OU {"email":"a@b.com", "confirm":true} args: {"status": "nouveau|contacté|...", "limit": 20}
+2) get_prospect args: {"prospect_id": 1} OU {"email": "a@b.com"}
+3) search_prospects args: {"query": "marc", "limit": 20}
+4) update_prospect_status args: {"prospect_id":1, "status":"contacté", "notes":"..."}
+5) draft_email args: {"to_email":"...","subject":"...","body":"...","prospect_id":1}
+6) send_email args: {"to_email":"...","subject":"...","body":"...","prospect_id":1}
+7) list_activities args: {"limit":20}
+8) get_send_stats args: {}
+
+Regles outils:
+- SUPPRESSION: si l utilisateur dit supprimer/effacer/delete, appelle IMMEDIATEMENT delete_prospect avec prospect_id ou email et confirm=true.
+- Apres outil, reponds en texte court. Jamais de monologue interne.
+
+- delete_prospect exige confirm=true. Si l'utilisateur demande une suppression, appelle d'abord sans confirm pour montrer le prospect, puis avec confirm=true apres accord (ou directement confirm=true s'il dit explicitement de supprimer).
+- Ne supprime JAMAIS en masse sans instruction claire.
+- Pour envoyer un email: d'abord redige un bon message, puis appelle send_email.
+- En DRY_RUN, send_email SIMULE seulement (c'est voulu).
+- Tu PEUX creer un prospect avec create_prospect si l'utilisateur te donne au minimum un email.
+- Ne invente pas d'email prospect: utilise la base ou les infos fournies par l'utilisateur.
+- Si info manquante, pose une question (reponse texte normale, pas JSON).
+- Si tu reponds a l'utilisateur sans outil, texte normal markdown/plain, PAS de JSON.
+"""
+
+def execute_tool(db, tool_name, args):
+    args = args or {}
+    if tool_name in ("delete_prospect", "remove_prospect", "supprimer_prospect"):
+        return tool_delete_prospect(
+            db,
+            prospect_id=args.get("prospect_id") or args.get("id"),
+            email=args.get("email"),
+            confirm=bool(args.get("confirm", True)),
+        )
+
+    if tool_name in ("create_prospect", "add_prospect"):
+        return tool_create_prospect(
+            db,
+            first_name=args.get("first_name"),
+            last_name=args.get("last_name"),
+            email=args.get("email"),
+            company=args.get("company") or args.get("company_name"),
+            job_title=args.get("job_title"),
+            industry=args.get("industry"),
+            country=args.get("country"),
+            notes=args.get("notes"),
+            qualification_score=args.get("qualification_score", 50),
+        )
+    
+    if tool_name in ("generate_sequence", "create_sequence", "sequence"):
+        return tool_generate_sequence(
+            db,
+            offer=args.get("offer") or args.get("produit") or "",
+            target=args.get("target") or args.get("cible") or "",
+            channel=args.get("channel") or args.get("canal") or "both",
+            steps_count=args.get("steps_count") or args.get("steps") or 4,
+            tone=args.get("tone") or "pro",
+        )
+    if tool_name in ("apply_sequence_step1", "apply_sequence", "start_sequence"):
+        return tool_apply_sequence_step1(
+            db,
+            prospect_id=args.get("prospect_id") or args.get("id"),
+            email=args.get("email"),
+            offer=args.get("offer") or "",
+            target=args.get("target") or "",
+            send=bool(args.get("send", True)),
+        )
+
+    if tool_name == "list_prospects":
+        return tool_list_prospects(db, status=args.get("status"), limit=args.get("limit", 20))
+    if tool_name == "get_prospect":
+        return tool_get_prospect(db, prospect_id=args.get("prospect_id"), email=args.get("email"))
+    if tool_name == "search_prospects":
+        return tool_search_prospects(db, query=args.get("query", ""), limit=args.get("limit", 20))
+    if tool_name == "update_prospect_status":
+        return tool_update_prospect_status(
+            db,
+            status=args.get("status"),
+            prospect_id=args.get("prospect_id"),
+            email=args.get("email"),
+            notes=args.get("notes"),
+        )
+    if tool_name == "draft_email":
+        return tool_draft_email(
+            db,
+            to_email=args.get("to_email"),
+            subject=args.get("subject"),
+            body=args.get("body"),
+            prospect_id=args.get("prospect_id"),
+        )
+    if tool_name == "send_email":
+        return tool_send_email(
+            db,
+            to_email=args.get("to_email"),
+            subject=args.get("subject"),
+            body=args.get("body"),
+            prospect_id=args.get("prospect_id"),
+            force=bool(args.get("force", False)),
+        )
+    if tool_name == "list_activities":
+        return tool_list_activities(db, limit=args.get("limit", 20))
+    if tool_name == "get_send_stats":
+        return tool_get_send_stats(db)
+    return {"error": f"Outil inconnu: {tool_name}"}
+
+
 
 def extract_text(response) -> str:
     try:
@@ -217,12 +979,9 @@ def extract_text(response) -> str:
     except Exception:
         pass
     try:
-        cands = getattr(response, "candidates", None) or []
         parts = []
-        for c in cands:
+        for c in getattr(response, "candidates", []) or []:
             content = getattr(c, "content", None)
-            if not content:
-                continue
             for p in getattr(content, "parts", []) or []:
                 pt = getattr(p, "text", None)
                 if pt:
@@ -231,79 +990,426 @@ def extract_text(response) -> str:
     except Exception:
         return ""
 
-def ask_gemini(user_message: str, db_context: str, history: list):
-    """Retourne (reply, meta_dict)"""
-    global LAST_GEMINI_ERROR
+
+def extract_json_tool(text_in: str):
+    """Extrait un appel outil JSON meme s il est noye dans un monologue."""
+    if not text_in:
+        return None
+    s = str(text_in)
+    # blocs ```json ... ```
+    m = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", s, flags=re.I)
+    candidates = []
+    if m:
+        candidates.append(m.group(1))
+    # tous les objets { ... } contenant "tool"
+    for m in re.finditer(r"\{[\s\S]*?\}", s):
+        chunk = m.group(0)
+        if '"tool"' in chunk or "'tool'" in chunk:
+            candidates.append(chunk)
+    # du plus long au plus court (souvent le plus complet)
+    candidates = sorted(set(candidates), key=len, reverse=True)
+    import json as _json
+    for chunk in candidates:
+        try:
+            data = _json.loads(chunk)
+        except Exception:
+            # tentative soft: quotes simples -> doubles
+            try:
+                data = _json.loads(chunk.replace("'", '"'))
+            except Exception:
+                continue
+        if isinstance(data, dict) and data.get("tool"):
+            return {"tool": data.get("tool"), "args": data.get("args") or {}}
+    return None
+
+
+
+def clean_agent_reply(text_in: str) -> str:
+    if not text_in:
+        return text_in
+    t = str(text_in).replace("\r\n", "\n").strip()
+    if not t:
+        return t
+
+    # Ne pas ecraser une reponse utile
+    low = t.lower()
+
+    # retirer JSON outil affiche par erreur
+    t = re.sub(r"```(?:json)?[\s\S]*?```", "", t).strip()
+    t = re.sub(r"\{\s*\"tool\"[\s\S]*?\}\s*$", "", t).strip()
+
+    bad_starts = (
+        "user identity", "user:", "user message", "role:", "capabilities:",
+        "i should", "the user said", "step 1", "step 2", "tools available",
+        "if i want", "actually,", "wait,", "note:", "let's", "lets ",
+        "is it json", "does it follow", "analysis", "plan:", "placeholder"
+    )
+    kept = []
+    for line in t.splitlines():
+        s = line.strip()
+        sl = s.lower()
+        if not s:
+            if kept:
+                kept.append("")
+            continue
+        if s.startswith("*") and any(k in sl for k in ["user", "role", "tool", "should", "step"]):
+            continue
+        if any(sl.startswith(b) for b in bad_starts):
+            continue
+        if s.startswith("{") and '"tool"' in s:
+            continue
+        kept.append(line)
+    out = "\n".join(kept).strip()
+    out = re.sub(r"\n{3,}", "\n\n", out).strip()
+
+    # Si vide apres nettoyage, garder original court plutot qu un faux message
+    if not out:
+        # enlever lignes clairement meta de l original
+        raw_lines = []
+        for line in str(text_in).splitlines():
+            sl = line.strip().lower()
+            if not sl:
+                continue
+            if any(sl.startswith(b) for b in bad_starts) or sl.startswith("*"):
+                continue
+            raw_lines.append(line)
+        out = "\n".join(raw_lines).strip() or str(text_in).strip()
+
+    # INTERDIT de remplacer par le message generique "Compris je m en occupe"
+    return out
+
+def try_parse_tool_call(text_in: str):
+    return extract_json_tool(text_in)
+
+SYSTEM_PROMPT = """
+Tu es le co-pilote de prospection de Jean Constant Gonvanno Palouma.
+Tu parles en francais, de facon humaine, courte et professionnelle.
+
+REGLES:
+- Reponds comme un collegue, pas comme un robot.
+- N affiche JAMAIS ton raisonnement interne, ni de texte en anglais meta (I should, User identity, Step 1, etc.).
+- Si on te demande de creer un prospect, envoyer un email, lister ou supprimer: AGIS tout de suite avec l outil.
+Si tu dois AGIR avec un outil: reponds UNIQUEMENT avec un JSON valide du type {"tool":"...","args":{...}} sans texte autour.
+- Apres un resultat d outil: 2 a 5 phrases claires max.
+- Tu aides a: prospects, emails (DRY_RUN/LIVE), templates, LinkedIn (generation), stats, sequences plus tard.
+
+OUTILS (si disponibles dans le runtime):
+create_prospect, delete_prospect, list_prospects, get_prospect, search_prospects,
+update_prospect, draft_email, send_email, list_activities, get_send_stats,
+prospect_history, list_templates, render_template, generate_linkedin.
+
+Signature email (ajoute automatiquement par le systeme si besoin):
+Jean Constant Gonvanno Palouma
++33 6 20 07 81 93
+"""
+
+
+def _extract_email(s: str):
+    m = re.search(r"([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})", s or "")
+    return m.group(1).lower() if m else None
+
+def intent_execute(db, message: str):
+    """Fallback deterministe si le LLM n appelle aucun outil."""
+    msg = (message or "").strip()
+    low = msg.lower()
+    email = _extract_email(msg)
+
+    # CREATE PROSPECT
+    if any(k in low for k in ["cree prospect", "crée prospect", "creer prospect", "créer prospect", "ajoute prospect", "create prospect", "nouveau prospect"]):
+        # parse simple: email + tokens separes par virgule
+        parts = [p.strip() for p in msg.replace(":", ",").split(",") if p.strip()]
+        first = last = company = job = ""
+        # heuristique: ... email, prenom, nom, entreprise, poste
+        vals = []
+        for p in parts:
+            if "@" in p:
+                # extract email from part
+                e = _extract_email(p)
+                if e:
+                    email = e
+                # reste eventuel
+                rest = p
+                if e:
+                    rest = p.lower().replace(e, "").strip(" ,:-")
+                if rest and not first:
+                    # ignore verbs
+                    pass
+            else:
+                vals.append(p)
+        # vals often: "Cree prospect", "Jean Constant", "Gonvanno Palouma", "Prospection Solo", "Fondateur"
+        clean_vals = []
+        for v in vals:
+            vl = v.lower()
+            if any(x in vl for x in ["cree", "crée", "creer", "créer", "prospect", "ajoute", "create", "email"]):
+                continue
+            clean_vals.append(v)
+        if len(clean_vals) >= 1: first = clean_vals[0]
+        if len(clean_vals) >= 2: last = clean_vals[1]
+        if len(clean_vals) >= 3: company = clean_vals[2]
+        if len(clean_vals) >= 4: job = clean_vals[3]
+        if not email:
+            return False, "Pour creer un prospect j ai besoin au minimum d un email."
+        # split first if "Jean Constant"
+        if first and not last and " " in first:
+            bits = first.split()
+            first, last = bits[0], " ".join(bits[1:])
+        res = tool_create_prospect(
+            db,
+            first_name=first or "Prenom",
+            last_name=last or "Nom",
+            email=email,
+            company=company or "N/A",
+            job_title=job or "N/A",
+        )
+        if res.get("ok"):
+            st = res.get("status")
+            p = res.get("prospect") or {}
+            return True, f"Cest fait. Prospect {st}: {p.get('first_name','')} {p.get('last_name','')} <{p.get('email','')}> (ID {p.get('id')}).\nTu veux que je lui prepare un email ou que je l envoie en DRY_RUN ?"
+        return True, f"Echec creation prospect: {res.get('error') or res}"
+
+    # SEND EMAIL
+    if any(k in low for k in ["envoie", "envoyer", "send email", "envoi", "mail a", "e-mail", "email a", "email à"]):
+        if not email:
+            # try last known / single prospect
+            rows = db.query(Prospect).order_by(Prospect.id.desc()).limit(3).all()
+            if len(rows) == 1:
+                email = rows[0].email
+            elif rows:
+                return False, "Dis-moi a quel email envoyer (ex: envoie un mail a jcgp471@gmail.com)."
+            else:
+                return False, "Aucun prospect en base. Cree d abord un prospect."
+        p = db.query(Prospect).filter(Prospect.email == email).first()
+        first = p.first_name if p else "la"
+        company = (p.company if p and p.company else "votre entreprise")
+        subject = f"{first}, une idee rapide pour {company}"
+        body = (
+            f"Bonjour {first},\n\n"
+            f"Je me permets un message court concernant {company}. "
+            f"Je serais ravi d echanger 15 minutes sur vos priorites actuelles.\n\n"
+            f"Etes-vous ouvert a un creneau cette semaine ?\n\n"
+            f"Bien a vous,"
+        )
+        # custom subject/body if provided roughly
+        if "objet:" in low:
+            m = re.search(r"objet\s*:\s*(.+)", msg, flags=re.I)
+            if m: subject = m.group(1).strip().split("\n")[0][:120]
+        if "corps:" in low:
+            m = re.search(r"corps\s*:\s*([\s\S]+)", msg, flags=re.I)
+            if m: body = m.group(1).strip()
+
+        res = tool_send_email(
+            db,
+            to_email=email,
+            subject=subject,
+            body=body,
+            prospect_id=(p.id if p else None),
+        )
+        if not res.get("ok") and res.get("status") == "blocked":
+            return True, f"Envoi bloque: {res.get('reason')}"
+        st = res.get("status")
+        if st == "dry_run":
+            return True, (
+                f"Simulation OK (DRY_RUN).\n"
+                f"A: {res.get('to')}\n"
+                f"Objet: {res.get('subject')}\n\n"
+                f"{res.get('body')}\n\n"
+                f"Aucun email reel envoye. Passe en LIVE si tu veux un vrai envoi."
+            )
+        if st == "sent":
+            return True, f"Email REEL envoye a {res.get('to')} (status sent)."
+        return True, f"Resultat envoi: {res}"
+
+    # LIST
+    if any(k in low for k in ["liste mes prospects", "liste les prospects", "lister prospects", "montre mes prospects"]):
+        res = tool_list_prospects(db, limit=50)
+        if not res.get("count"):
+            return True, "Aucun prospect en base pour le moment."
+        lines = [f"- ID {p['id']}: {p.get('first_name','')} {p.get('last_name','')} | {p.get('email')} | {p.get('company')} | {p.get('status')}" for p in res.get("prospects", [])]
+        return True, "Voici tes prospects:\n" + "\n".join(lines)
+
+    # DELETE
+    if any(k in low for k in ["supprime", "supprimer", "efface", "delete prospect"]):
+        if not email:
+            m = re.search(r"id\s*(\d+)", low)
+            if m:
+                res = tool_delete_prospect(db, prospect_id=int(m.group(1)), confirm=True)
+            else:
+                return False, "Indique l email ou l ID a supprimer."
+        else:
+            res = tool_delete_prospect(db, email=email, confirm=True)
+        if res.get("ok"):
+            d = res.get("deleted") or {}
+            return True, f"Supprime: {d.get('email')} (ID {d.get('id')})."
+        return True, f"Suppression: {res.get('error') or res}"
+
+    return False, None
+
+
+
+# ===================== DYNAMIC SILENT GEMINI ROTATOR =====================
+def call_gemini_with_rotation(prompt_text):
+    """Bascule automatiquement et silencieusement entre les modeles Gemini valides."""
+    global ACTIVE_MODEL_NAME, GEMINI_AVAILABLE, LAST_GEMINI_ERROR, genai
+    key = (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "").strip().strip('"').strip("'")
+    if not key:
+        return None, None, "Clé GEMINI_API_KEY manquante dans le fichier .env"
+        
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=key)
+    except Exception as e:
+        return None, None, f"Erreur de configuration Google API: {e}"
+
+    # 1. Obtenir les modeles reels supportes par l'API
+    discovered_models = []
+    try:
+        for m in genai.list_models():
+            methods = list(getattr(m, "supported_generation_methods", []) or [])
+            if "generateContent" in methods:
+                name = getattr(m, "name", "").replace("models/", "")
+                if name and "gemini" in name.lower() and not any(b in name.lower() for b in ["gemma", "3.8", "chat-bison", "1.0-pro"]):
+                    discovered_models.append(name)
+    except Exception as e:
+        logger.warning(f"list_models dynamique echoue, utilisation de la liste de secours: {e}")
+
+    # Modeles de secours si la liste dynamique echoue
+    fallback_list = [
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite",
+        "gemini-2.0-flash-001",
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-8b",
+        "gemini-1.5-flash-001"
+    ]
+    
+    # Combiner et ordonner
+    pref = (os.getenv("GEMINI_MODEL") or "gemini-2.0-flash").strip()
+    cands = [pref] if pref else []
+    for m_name in discovered_models + fallback_list:
+        if m_name and m_name not in cands and not any(b in m_name.lower() for b in ["gemma", "3.8", "chat-bison"]):
+            cands.append(m_name)
+
+    # 2. Tester les modeles un par un silencieusement
+    for model_name in cands:
+        try:
+            m = genai.GenerativeModel(model_name)
+            res = m.generate_content(
+                prompt_text,
+                generation_config={
+                    "temperature": float(os.getenv("GEMINI_TEMPERATURE", "0.3") or 0.3),
+                    "max_output_tokens": int(os.getenv("GEMINI_MAX_TOKENS", "2048") or 2048),
+                }
+            )
+            txt = (getattr(res, "text", None) or "").strip()
+            if txt:
+                ACTIVE_MODEL_NAME = model_name
+                GEMINI_AVAILABLE = True
+                LAST_GEMINI_ERROR = None
+                return txt, model_name, None
+        except Exception as e:
+            # On ignore silencieusement les 404, 429 et 500 et on passe au modele suivant
+            logger.info(f"Bascule modele: {model_name} non disponible ({type(e).__name__}) -> Recherche du suivant...")
+            continue
+
+    return None, None, "Les modèles Gemini gratuits sont temporairement en pause de quota. Réessaie dans 30 secondes !"
+# =========================================================================
+
+
+def ask_agent(db, user_message: str, history: list):
+    """Boucle agent avec tools (max 4 hops)."""
+    db_context = build_db_context(db)
     meta = {
         "engine": "fallback",
         "model": ACTIVE_MODEL_NAME,
-        "gemini_available": GEMINI_AVAILABLE,
+        "tools_used": [],
         "error": None,
+        "dry_run": DRY_RUN,
     }
 
-    if not GEMINI_AVAILABLE or not GEMINI_API_KEY or genai is None:
+    if not GEMINI_AVAILABLE or genai is None:
         meta["error"] = LAST_GEMINI_ERROR or "Gemini indisponible"
-        return smart_fallback(user_message, history, db_context), meta
+        # mini fallback action-aware
+        msg = user_message.lower()
+        if "stat" in msg or "quota" in msg:
+            return json.dumps(tool_get_send_stats(db), ensure_ascii=False, indent=2), meta
+        if "prospect" in msg and ("liste" in msg or "list" in msg):
+            return json.dumps(tool_list_prospects(db), ensure_ascii=False, indent=2), meta
+        return (
+            "IA cloud indisponible pour le moment. Je peux quand meme lister prospects / stats via commandes simples.\n"
+            f"Contexte:\n{db_context}"
+        ), meta
 
+    messages_trace = []
     history_txt = ""
     for turn in history[-MAX_HISTORY:]:
         role = "Utilisateur" if turn["role"] == "user" else "Agent"
         history_txt += f"{role}: {turn['content']}\n"
 
-    prompt = (
-        f"{SYSTEM_PROMPT}\n\n"
-        f"=== BASE PROSPECTS ===\n{db_context}\n\n"
-        f"=== HISTORIQUE ===\n{history_txt or '(debut)'}\n\n"
-        f"=== MESSAGE ===\n{user_message}\n\n"
-        f"Reponds maintenant (naturel, utile, sans te repeter):"
-    )
+    work_message = user_message
+    model = genai.GenerativeModel((ACTIVE_MODEL_NAME if (ACTIVE_MODEL_NAME and 'gemma' not in str(ACTIVE_MODEL_NAME).lower()) else os.getenv('GEMINI_MODEL', 'gemini-2.0-flash')))  # gemma guard
 
-    try:
-        model = genai.GenerativeModel(ACTIVE_MODEL_NAME or GEMINI_MODEL_ENV)
-        response = model.generate_content(
-            prompt,
-            generation_config={
-                "temperature": float(os.getenv("GEMINI_TEMPERATURE", "0.7") or 0.7),
-                "max_output_tokens": int(os.getenv("GEMINI_MAX_TOKENS", "2048") or 2048),
-            },
+    for hop in range(4):
+        prompt = (
+            f"{SYSTEM_PROMPT}\n\n"
+            f"=== CONTEXTE BASE ===\n{db_context}\n\n"
+            f"=== HISTORIQUE ===\n{history_txt or '(debut)'}\n\n"
+            f"=== TRACE OUTILS ===\n{json.dumps(messages_trace, ensure_ascii=False)}\n\n"
+            f"=== MESSAGE UTILISATEUR ===\n{work_message}\n\n"
+            f"Reponds soit en TEXTE utile, soit en JSON outil unique."
         )
-        text = extract_text(response)
-        if not text:
-            LAST_GEMINI_ERROR = "Reponse Gemini vide (maybe blocked/safety)"
-            meta["error"] = LAST_GEMINI_ERROR
+        text_res, model_used, err_res = call_gemini_with_rotation(prompt)
+        if text_res:
+            text = text_res
+            meta["engine"] = "gemini"
+            meta["model"] = model_used
+        else:
+            meta["error"] = err_res
             meta["engine"] = "fallback"
-            logger.error(LAST_GEMINI_ERROR + f" raw={response}")
-            return smart_fallback(user_message, history, db_context), meta
+            return err_res, meta
 
-        meta["engine"] = "gemini"
-        meta["error"] = None
-        return text, meta
-    except Exception as e:
-        LAST_GEMINI_ERROR = f"{type(e).__name__}: {e}"
-        meta["error"] = LAST_GEMINI_ERROR
-        meta["engine"] = "fallback"
-        logger.error("Gemini call failed: %s\n%s", LAST_GEMINI_ERROR, traceback.format_exc())
-        return smart_fallback(user_message, history, db_context), meta
+        tool_call = try_parse_tool_call(text)
+        if not tool_call:
+            return clean_agent_reply(text), meta
 
-def send_email_smtp(to_email: str, subject: str, body: str) -> bool:
-    try:
-        msg = MIMEMultipart()
-        msg["From"] = SMTP_USER
-        msg["To"] = to_email
-        msg["Subject"] = subject
-        msg.attach(MIMEText(body, "plain", "utf-8"))
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.send_message(msg)
-        return True
-    except Exception as e:
-        logger.error(f"SMTP: {e}")
-        return False
+        tool_name = tool_call["tool"]
+        args = tool_call.get("args") or {}
+        result = execute_tool(db, tool_name, args)
+        if (
+            tool_name in ("delete_prospect", "remove_prospect", "supprimer_prospect")
+            and isinstance(result, dict)
+            and result.get("status") == "confirmation_required"
+        ):
+            args = dict(args or {})
+            args["confirm"] = True
+            result = execute_tool(db, tool_name, args)
 
+        meta["tools_used"].append({"tool": tool_name, "args": args, "result_status": result.get("status") if isinstance(result, dict) else None})
+        messages_trace.append({"tool": tool_name, "args": args, "result": result})
+
+        # feed result and ask final answer if last hop or tool is terminal
+        work_message = (
+            f"L'utilisateur a dit: {user_message}\n"
+            f"Tu as appele l'outil {tool_name} avec {json.dumps(args, ensure_ascii=False)}.\n"
+            f"Resultat outil: {json.dumps(result, ensure_ascii=False)}\n"
+            f"Maintenant: explique a l'utilisateur en francais clair ce qui s'est passe, "
+            f"et propose la prochaine etape. Si un autre outil est VRAIMENT necessaire, renvoie encore un JSON outil. "
+            f"Sinon reponds en texte normal."
+        )
+        db_context = build_db_context(db)
+
+    # too many hops
+    return (
+        "J'ai execute plusieurs actions outils. Voici la trace:\n" +
+        json.dumps(messages_trace, ensure_ascii=False, indent=2)
+    ), meta
+
+# ===================== AUTH =====================
 @app.before_request
 def require_token():
-    public = ["/", "/ui", "/health", "/api/chat", "/api/admin/chat", "/api/admin/stats", "/favicon.ico"]
+    public = [
+        "/", "/ui", "/health", "/api/chat", "/api/admin/chat", "/api/admin/stats",
+        "/api/activities", "/api/agent/act", "/api/config/email-mode", "/favicon.ico",
+    ]
     if request.path in public or request.path.startswith("/static/") or request.method == "OPTIONS":
         return None
     if not INTERNAL_API_TOKEN:
@@ -312,6 +1418,7 @@ def require_token():
     if auth != f"Bearer {INTERNAL_API_TOKEN}":
         return jsonify({"error": "Unauthorized"}), 401
 
+# ===================== ROUTES =====================
 @app.route("/")
 def root():
     return jsonify({
@@ -320,190 +1427,77 @@ def root():
         "ui": "/ui",
         "gemini": "ok" if GEMINI_AVAILABLE else "fallback",
         "model": ACTIVE_MODEL_NAME,
-        "last_error": LAST_GEMINI_ERROR,
+        "dry_run": DRY_RUN,
     }), 200
 
 @app.route("/health")
 def health():
+    db = SessionLocal()
     try:
-        db = SessionLocal()
         count = db.query(Prospect).count()
-        db.close()
+        stats = tool_get_send_stats(db)
         return jsonify({
             "status": "healthy",
             "database": "ok",
             "prospects_count": count,
             "gemini": "ok" if GEMINI_AVAILABLE else "fallback",
             "model": ACTIVE_MODEL_NAME,
-            "gemini_key_present": bool(GEMINI_API_KEY),
-            "gemini_key_len": len(GEMINI_API_KEY or ""),
             "last_error": LAST_GEMINI_ERROR,
-            "smtp": "configured" if SMTP_USER else "missing",
+            "gemini_key_present": bool(GEMINI_API_KEY),
+            "smtp": "configured" if (SMTP_USER and SMTP_PASSWORD) else "missing",
+            "email_mode": "DRY_RUN" if DRY_RUN else "LIVE",
+            "email_stats": stats,
         }), 200
     except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 500
+    finally:
+        db.close()
 
-@app.route("/ui")
-def ui():
-    html = """<!DOCTYPE html>
-<html lang="fr"><head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Agent de Prospection</title>
-<style>
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:Arial,sans-serif;background:linear-gradient(135deg,#0f172a,#1e3a5f);min-height:100vh;color:#fff}
-.container{width:min(1000px,calc(100% - 32px));margin:0 auto;padding:32px 0}
-h1{font-size:28px} .sub{color:#dbeafe;margin-top:6px}
-.badge{display:inline-block;margin-top:8px;font-size:12px;padding:4px 10px;border-radius:999px;background:#e2e8f0;color:#334155}
-.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:18px 0}
-.stat{background:rgba(255,255,255,.1);border-radius:12px;padding:16px;text-align:center}
-.stat-value{font-size:28px;font-weight:bold;color:#60a5fa}
-.stat-label{font-size:12px;color:#dbeafe;margin-top:4px}
-.chat-box{background:rgba(255,255,255,.96);border-radius:16px;overflow:hidden;min-height:520px;display:flex;flex-direction:column}
-.chat-header{padding:18px;border-bottom:1px solid #e2e8f0;color:#102a43}
-.chat-header p{color:#64748b;font-size:13px;margin-top:5px}
-.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
-.chip{border:1px solid #cbd5e1;background:#f1f5f9;color:#334155;border-radius:999px;padding:6px 10px;font-size:12px;cursor:pointer}
-#messages{flex:1;overflow-y:auto;padding:20px;background:#f8fafc;min-height:340px}
-.message{max-width:80%;margin-bottom:12px;padding:12px 15px;border-radius:12px;line-height:1.5;white-space:pre-wrap;word-wrap:break-word}
-.user-msg{margin-left:auto;background:#2563eb;color:#fff}
-.agent-msg{margin-right:auto;background:#fff;color:#1e293b;border:1px solid #e2e8f0}
-.meta{font-size:11px;color:#94a3b8;margin-top:-6px;margin-bottom:10px}
-.chat-form{display:flex;gap:10px;padding:16px;border-top:1px solid #e2e8f0;background:#fff}
-#prompt{flex:1;padding:12px;border:1px solid #cbd5e1;border-radius:9px;font-size:15px;outline:none;color:#0f172a}
-#send{padding:12px 20px;background:#2563eb;color:#fff;border:none;border-radius:9px;font-weight:bold;cursor:pointer}
-</style></head><body>
-<div class="container">
-  <h1>Agent de Prospection</h1>
-  <p class="sub">Co-pilote multi-sujets — sessions, scripts, objections, ICP</p>
-  <div class="badge" id="ai-status">IA: ...</div>
-  <div class="stats">
-    <div class="stat"><div class="stat-value" id="count-total">0</div><div class="stat-label">Prospects total</div></div>
-    <div class="stat"><div class="stat-value" id="count-new">0</div><div class="stat-label">Nouveaux</div></div>
-    <div class="stat"><div class="stat-value" id="count-contacted">0</div><div class="stat-label">Contactés</div></div>
-  </div>
-  <div class="chat-box">
-    <div class="chat-header">
-      <h2>Assistant de Prospection</h2>
-      <p>Discute librement. Les réponses doivent varier et provenir de Gemini si le badge est vert.</p>
-      <div class="chips">
-        <button type="button" class="chip" data-msg="Prepare une session de prospection de 45 min">Session 45 min</button>
-        <button type="button" class="chip" data-msg="Aide-moi a definir mon ICP">ICP</button>
-        <button type="button" class="chip" data-msg="Redige un cold email percutant">Cold email</button>
-        <button type="button" class="chip" data-msg="Fais un jeu de role client difficile">Jeu de role</button>
-      </div>
-    </div>
-    <div id="messages"></div>
-    <form class="chat-form" id="chat-form">
-      <input id="prompt" type="text" placeholder="Ex: je vends du coaching a des dirigeants RH..." autocomplete="off" required>
-      <button id="send" type="submit">Envoyer</button>
-    </form>
-  </div>
-</div>
-<script>
-const messages=document.getElementById('messages');
-const form=document.getElementById('chat-form');
-const input=document.getElementById('prompt');
-const btn=document.getElementById('send');
-const sessionId=localStorage.getItem('ps_session')||(crypto.randomUUID?crypto.randomUUID():String(Date.now()));
-localStorage.setItem('ps_session',sessionId);
-function addMsg(role,text,meta){
-  const d=document.createElement('div');
-  d.className='message '+(role==='user'?'user-msg':'agent-msg');
-  d.textContent=text; messages.appendChild(d);
-  if(meta){const m=document.createElement('div');m.className='meta';m.textContent=meta;messages.appendChild(m);}
-  messages.scrollTop=messages.scrollHeight;
-}
-async function loadStats(){try{const d=await (await fetch('/api/admin/stats')).json();
- document.getElementById('count-total').textContent=d.prospects_count||0;
- document.getElementById('count-new').textContent=d.new_count||0;
- document.getElementById('count-contacted').textContent=d.contacted_count||0;}catch(e){}}
-async function loadHealth(){try{const d=await (await fetch('/health')).json();const el=document.getElementById('ai-status');
- if(d.gemini==='ok'){el.textContent='IA: Gemini ON · '+(d.model||'?');el.style.background='#dcfce7';el.style.color='#166534';}
- else{el.textContent='IA: FALLBACK · '+(d.last_error||'cle/modele KO');el.style.background='#fee2e2';el.style.color='#991b1b';}
-}catch(e){}}
-async function sendMessage(msg){
- addMsg('user',msg); btn.disabled=true; btn.textContent='...';
- try{
-  const r=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:msg,session_id:sessionId})});
-  const d=await r.json();
-  const meta='engine='+(d.engine||'?')+(d.model?(' · '+d.model):'')+(d.error?(' · err: '+d.error):'');
-  addMsg('agent', d.reply||d.error||'Erreur', meta);
-  loadStats(); loadHealth();
- }catch(err){addMsg('agent','Erreur de connexion au serveur.');}
- finally{btn.disabled=false;btn.textContent='Envoyer';input.focus();}
-}
-form.addEventListener('submit',async e=>{e.preventDefault();const msg=input.value.trim();if(!msg)return;input.value='';await sendMessage(msg);});
-document.querySelectorAll('.chip').forEach(c=>c.addEventListener('click',()=>sendMessage(c.getAttribute('data-msg'))));
-addMsg('agent',"Salut ! Je suis ton co-pilote de prospection.\\nDis-moi ton offre + cible, ou clique une suggestion.");
-loadStats(); loadHealth();
-</script></body></html>"""
-    return Response(html, mimetype="text/html")
-
-@app.route("/api/prospects", methods=["POST"])
-def create_prospect():
+@app.route("/api/config/email-mode", methods=["GET", "POST"])
+def email_mode():
+    global DRY_RUN
+    if request.method == "GET":
+        return jsonify({"dry_run": DRY_RUN, "mode": "DRY_RUN" if DRY_RUN else "LIVE"}), 200
     data = request.get_json() or {}
-    email = (data.get("email") or "").strip().lower()
-    if not email:
-        return jsonify({"error": "email requis"}), 400
+    if "dry_run" in data:
+        DRY_RUN = bool(data.get("dry_run"))
+    mode = (data.get("mode") or "").upper()
+    if mode == "LIVE":
+        DRY_RUN = False
+    elif mode == "DRY_RUN":
+        DRY_RUN = True
+    return jsonify({"ok": True, "dry_run": DRY_RUN, "mode": "DRY_RUN" if DRY_RUN else "LIVE",
+                    "warning": None if DRY_RUN else "MODE LIVE: les emails seront vraiment envoyes."}), 200
+
+@app.route("/api/activities", methods=["GET"])
+def activities():
     db = SessionLocal()
     try:
-        existing = db.query(Prospect).filter(Prospect.email == email).first()
-        if existing:
-            return jsonify({"status": "exists", "id": existing.id}), 200
-        p = Prospect(
-            first_name=(data.get("first_name") or "").strip(),
-            last_name=(data.get("last_name") or "").strip(),
-            email=email,
-            company=(data.get("company") or "").strip() or None,
-            job_title=(data.get("job_title") or "").strip() or None,
-            industry=(data.get("industry") or "").strip() or None,
-            country=(data.get("country") or "").strip().upper() or None,
-            status="nouveau",
-            qualification_score=int(data.get("qualification_score") or 50),
-            notes=(data.get("notes") or "").strip() or None,
-        )
-        db.add(p); db.commit(); db.refresh(p)
-        return jsonify({"status": "success", "id": p.id}), 201
-    except Exception as e:
-        db.rollback(); return jsonify({"error": str(e)}), 500
+        limit = min(int(request.args.get("limit", 30)), 200)
+        return jsonify(tool_list_activities(db, limit=limit)), 200
     finally:
         db.close()
 
-@app.route("/api/prospects", methods=["GET"])
-def list_prospects():
-    limit = min(int(request.args.get("limit", 50)), 200)
-    db = SessionLocal()
-    try:
-        rows = db.query(Prospect).order_by(Prospect.id.desc()).limit(limit).all()
-        return jsonify({"count": len(rows), "prospects": [
-            {"id": r.id, "first_name": r.first_name, "last_name": r.last_name, "email": r.email,
-             "company": r.company, "status": r.status} for r in rows
-        ]}), 200
-    finally:
-        db.close()
-
-@app.route("/api/prospects/<int:pid>", methods=["DELETE"])
-def delete_prospect(pid):
-    db = SessionLocal()
-    try:
-        p = db.query(Prospect).filter(Prospect.id == pid).first()
-        if not p: return jsonify({"error": "non trouve"}), 404
-        db.delete(p); db.commit()
-        return jsonify({"status": "success"}), 200
-    except Exception as e:
-        db.rollback(); return jsonify({"error": str(e)}), 500
-    finally:
-        db.close()
-
-@app.route("/api/send-email", methods=["POST"])
-def send_email_route():
+@app.route("/api/agent/act", methods=["POST"])
+def agent_act():
     data = request.get_json() or {}
-    to, subject, body = data.get("to",""), data.get("subject",""), data.get("body","")
-    if not all([to, subject, body]):
-        return jsonify({"error": "to, subject, body requis"}), 400
-    ok = send_email_smtp(to, subject, body)
-    return (jsonify({"status": "success"}), 200) if ok else (jsonify({"error": "echec smtp"}), 500)
+    message = (data.get("message") or data.get("instruction") or "").strip()
+    session_id = (data.get("session_id") or "act").strip()
+    if not message:
+        return jsonify({"error": "message requis"}), 400
+    db = SessionLocal()
+    try:
+        history = CHAT_HISTORY[session_id]
+        
+        reply, meta = ask_agent(db, message, history)
+        reply = clean_agent_reply(reply)
+        history.append({"role": "user", "content": message})
+        history.append({"role": "agent", "content": reply})
+        return jsonify({"reply": reply, **meta}), 200
+    except Exception as e:
+        return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+    finally:
+        db.close()
 
 @app.route("/api/chat", methods=["POST"])
 def chat():
@@ -512,22 +1506,32 @@ def chat():
     session_id = (data.get("session_id") or request.remote_addr or "default").strip()
     if not message:
         return jsonify({"error": "message vide"}), 400
+
+        # Fallback intention deterministe (si LLM ne call aucun tool)
+        handled, intent_reply = intent_execute(db, message)
+        if handled:
+            history.append({"role": "user", "content": message})
+            history.append({"role": "agent", "content": intent_reply})
+            return jsonify({
+                "reply": intent_reply,
+                "engine": "intent",
+                "tools_used": [{"tool": "intent_router"}],
+                "dry_run": DRY_RUN,
+                "model": ACTIVE_MODEL_NAME,
+                "error": None,
+            }), 200
+
     db = SessionLocal()
     try:
-        db_context = build_db_context(db)
         history = CHAT_HISTORY[session_id]
-        reply, meta = ask_gemini(message, db_context, history)
+        
+        reply, meta = ask_agent(db, message, history)
+        reply = clean_agent_reply(reply)
         history.append({"role": "user", "content": message})
         history.append({"role": "agent", "content": reply})
         if len(history) > MAX_HISTORY * 2:
             CHAT_HISTORY[session_id] = history[-(MAX_HISTORY * 2):]
-        return jsonify({
-            "reply": reply,
-            "engine": meta.get("engine"),
-            "model": meta.get("model"),
-            "error": meta.get("error"),
-            "gemini": "ok" if GEMINI_AVAILABLE else "fallback",
-        }), 200
+        return jsonify({"reply": reply, **meta}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
@@ -540,31 +1544,102 @@ def admin_stats():
         total = db.query(Prospect).count()
         nouveaux = db.query(Prospect).filter(Prospect.status == "nouveau").count()
         contactes = db.query(Prospect).filter(Prospect.status == "contacté").count()
-        return jsonify({"prospects_count": total, "new_count": nouveaux, "contacted_count": contactes}), 200
+        stats = tool_get_send_stats(db)
+        return jsonify({
+            "prospects_count": total,
+            "new_count": nouveaux,
+            "contacted_count": contactes,
+            "email_stats": stats,
+            "dry_run": DRY_RUN,
+        }), 200
     finally:
         db.close()
 
-@app.route("/api/admin/chat", methods=["POST"])
-def admin_chat():
+@app.route("/api/prospects", methods=["POST"])
+def create_prospect():
     data = request.get_json() or {}
-    instruction = (data.get("instruction") or data.get("message") or "").strip()
-    session_id = (data.get("session_id") or "admin").strip()
-    if not instruction:
-        return jsonify({"error": "Instruction vide"}), 400
+    email = (data.get("email") or "").strip().lower()
+    if not email:
+        return jsonify({"error": "email requis"}), 400
     db = SessionLocal()
     try:
-        db_context = build_db_context(db)
-        history = CHAT_HISTORY[session_id]
-        answer, meta = ask_gemini(instruction, db_context, history)
-        history.append({"role": "user", "content": instruction})
-        history.append({"role": "agent", "content": answer})
-        return jsonify({"status": "success", "answer": answer, "reply": answer, **meta}), 200
+        existing = db.query(Prospect).filter(Prospect.email == email).first()
+        if existing:
+            return jsonify({"status": "exists", "id": existing.id, "email": existing.email}), 200
+        p = Prospect(
+            first_name=(data.get("first_name") or "").strip(),
+            last_name=(data.get("last_name") or "").strip(),
+            email=email,
+            company=(data.get("company") or data.get("company_name") or "N/A").strip(),
+            company_name=(data.get("company") or data.get("company_name") or "N/A").strip(),
+            job_title=(data.get("job_title") or "").strip() or None,
+            industry=(data.get("industry") or "").strip() or None,
+            country=(data.get("country") or "").strip().upper() or None,
+            status="nouveau",
+            qualification_score=int(data.get("qualification_score") or 50),
+            notes=(data.get("notes") or "").strip() or None,
+        )
+        db.add(p); db.commit(); db.refresh(p)
+        return jsonify({"status": "success", "id": p.id, "email": p.email}), 201
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        db.rollback(); return jsonify({"error": str(e)}), 500
     finally:
         db.close()
+
+@app.route("/api/prospects", methods=["GET"])
+def list_prospects_route():
+    db = SessionLocal()
+    try:
+        limit = min(int(request.args.get("limit", 50)), 200)
+        status = request.args.get("status")
+        return jsonify(tool_list_prospects(db, status=status, limit=limit)), 200
+    finally:
+        db.close()
+
+@app.route("/api/send-email", methods=["POST"])
+def send_email_route():
+    data = request.get_json() or {}
+    db = SessionLocal()
+    try:
+        result = tool_send_email(
+            db,
+            to_email=data.get("to") or data.get("to_email"),
+            subject=data.get("subject"),
+            body=data.get("body"),
+            prospect_id=data.get("prospect_id"),
+            force=bool(data.get("force", False)),
+        )
+        code = 200 if result.get("ok") else 400
+        return jsonify(result), code
+    finally:
+        db.close()
+
+
+@app.route("/api/kb/offer", methods=["GET", "POST"])
+def kb_offer_route():
+    db = SessionLocal()
+    try:
+        if request.method == "POST":
+            data = request.get_json() or {}
+            res = tool_save_offer_icp(db, **data)
+            return jsonify(res), 200
+        return jsonify(tool_get_offer_icp(db)), 200
+    finally:
+        db.close()
+
+@app.route("/ui")
+def ui():
+    try:
+        ui_path = os.path.join(os.path.dirname(__file__), "static", "ui.html")
+        with open(ui_path, "r", encoding="utf-8") as f:
+            html = f.read()
+        return Response(html, mimetype="text/html")
+    except Exception as e:
+        return Response("<h1>UI Error</h1><pre>%s</pre>" % e, mimetype="text/html", status=500)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
-    logger.info(f"Start port={port} gemini={GEMINI_AVAILABLE} model={ACTIVE_MODEL_NAME} err={LAST_GEMINI_ERROR}")
+    logger.info(
+        f"Start port={port} gemini={GEMINI_AVAILABLE} model={ACTIVE_MODEL_NAME} dry_run={DRY_RUN} smtp={bool(SMTP_USER)}"
+    )
     app.run(host="0.0.0.0", port=port, debug=False)

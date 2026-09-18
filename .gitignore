@@ -1,8 +1,8 @@
-﻿*.db
-*.sqlite
-*.sqlite3
-.env
-.env.*
-venv/
+﻿venv/
+.venv/
 __pycache__/
+*.pyc
+.env
+data/
 logs/
+_archive/

@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent de Prospection — Dashboard</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Arial,Helvetica,sans-serif;background:#0f172a;color:#f8fafc;min-height:100vh}
+.header{background:#1e293b;border-bottom:1px solid #334155;padding:14px 18px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+.header h1{font-size:18px;color:#38bdf8}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.badge{font-size:11px;padding:4px 10px;border-radius:999px;background:#334155;color:#cbd5e1;font-weight:700}
+.btn{border:0;border-radius:8px;padding:8px 12px;font-size:12px;font-weight:700;cursor:pointer}
+.btn-primary{background:#0284c7;color:#fff}
+.btn-dry{background:#fef08a;color:#854d0e}
+.btn-live{background:#fecaca;color:#991b1b}
+.btn-dark{background:#334155;color:#fff}
+.btn-danger{background:#ef4444;color:#fff}
+.btn-sm{padding:5px 8px;font-size:11px}
+.tabs{display:flex;gap:6px;background:#1e293b;border-bottom:1px solid #334155;padding:0 12px;overflow:auto}
+.tab{background:transparent;border:0;color:#94a3b8;padding:12px 14px;font-size:13px;font-weight:700;cursor:pointer;border-bottom:2px solid transparent}
+.tab.active{color:#38bdf8;border-bottom-color:#38bdf8}
+.wrap{max-width:1280px;margin:0 auto;padding:18px}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:16px}
+@media(max-width:900px){.stats{grid-template-columns:repeat(2,1fr)}.grid2{grid-template-columns:1fr !important}}
+.stat{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:14px;text-align:center}
+.stat b{display:block;font-size:22px;color:#38bdf8}
+.stat span{font-size:11px;color:#94a3b8}
+.panel{display:none}
+.panel.active{display:block}
+.grid2{display:grid;grid-template-columns:2fr 1fr;gap:12px}
+.card{background:#1e293b;border:1px solid #334155;border-radius:12px;overflow:hidden;display:flex;flex-direction:column;min-height:540px}
+.card h2{font-size:14px;padding:12px 14px;border-bottom:1px solid #334155}
+.card .body{padding:14px}
+#messages{flex:1;overflow:auto;padding:14px;background:#0f172a}
+.msg{max-width:85%;margin:0 0 10px;padding:10px 12px;border-radius:10px;font-size:13px;line-height:1.45;white-space:pre-wrap;word-break:break-word}
+.user{margin-left:auto;background:#0284c7;color:#fff}
+.agent{margin-right:auto;background:#1e293b;border:1px solid #334155;color:#f8fafc}
+.meta{font-size:10px;color:#64748b;margin-top:4px}
+.bar{display:flex;gap:8px;padding:12px;border-top:1px solid #334155;background:#1e293b}
+.bar input,.inp,select,textarea{width:100%;padding:10px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:#fff;font-size:13px}
+.chips{display:flex;gap:6px;flex-wrap:wrap;padding:0 14px 10px}
+.chip{border:0;background:#334155;color:#e2e8f0;border-radius:999px;padding:5px 10px;font-size:11px;cursor:pointer}
+#acts{flex:1;overflow:auto;padding:12px;background:#0f172a;font-size:12px}
+.act{border:1px solid #334155;border-radius:8px;padding:8px;margin-bottom:8px;background:#111827}
+.ok{color:#4ade80}.warn{color:#facc15}.err{color:#f87171}
+.toolbar{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{padding:10px;border-bottom:1px solid #334155;text-align:left;vertical-align:top}
+th{color:#94a3b8}
+.formgrid{display:grid;gap:10px;max-width:720px}
+.seq-grid{display:grid;grid-template-columns:1.2fr 1.2fr 0.8fr auto;gap:8px}
+@media(max-width:900px){.seq-grid{grid-template-columns:1fr}}
+.muted{color:#94a3b8;font-size:12px}
+.box{background:#0f172a;border:1px solid #334155;border-radius:10px;padding:12px;margin-top:10px}
+</style>
+</head>
+<body>
+  <div class="header">
+    <div>
+      <h1>Agent Prospection</h1>
+      <div class="muted">Phase 2 + 3 + 4 restaurees · session commune terminal_session</div>
+    </div>
+    <div class="row">
+      <span class="badge" id="ai">IA: ...</span>
+      <span class="badge" id="mail">Email: ...</span>
+      <button class="btn btn-dry" id="btnDry" type="button">DRY_RUN</button>
+      <button class="btn btn-live" id="btnLive" type="button">LIVE</button>
+    </div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="chat" type="button">Chat Copilote</button>
+    <button class="tab" data-tab="prospects" type="button">Prospects CRM</button>
+    <button class="tab" data-tab="sequences" type="button">Sequences & Templates</button>
+    <button class="tab" data-tab="memory" type="button">Memoire Offre / ICP</button>
+  </div>
+
+  <div class="wrap">
+    <div class="stats">
+      <div class="stat"><b id="sTotal">0</b><span>Prospects</span></div>
+      <div class="stat"><b id="sNew">0</b><span>Nouveaux</span></div>
+      <div class="stat"><b id="sContact">0</b><span>Contactes / Sequence</span></div>
+      <div class="stat"><b id="sMail">0</b><span>Emails jour</span></div>
+    </div>
+
+    <!-- CHAT -->
+    <div id="panel-chat" class="panel active">
+      <div class="grid2">
+        <div class="card">
+          <h2>Chat Assistant IA</h2>
+          <div class="chips">
+            <button class="chip" type="button" data-msg="Liste mes prospects">Lister prospects</button>
+            <button class="chip" type="button" data-msg="Genere une sequence de prospection (3 emails + 2 LinkedIn) pour vendre des sites web a des agences immobilieres">Sequence Immo</button>
+            <button class="chip" type="button" data-msg="Envoie un cold email DRY_RUN a jcgp471@gmail.com">Email DRY_RUN</button>
+            <button class="chip" type="button" data-msg="Montre mon offre memorisee">Offre memoire</button>
+          </div>
+          <div id="messages"></div>
+          <form class="bar" id="form">
+            <input id="prompt" type="text" placeholder="Ex: salut / cree prospect / genere sequence..." autocomplete="off" required>
+            <button class="btn btn-primary" id="send" type="submit">Envoyer</button>
+          </form>
+        </div>
+        <div class="card">
+          <h2>Activites recentes</h2>
+          <div id="acts"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- PROSPECTS -->
+    <div id="panel-prospects" class="panel">
+      <div class="toolbar">
+        <div class="row">
+          <input class="inp" id="q" placeholder="Rechercher nom, email, entreprise" style="width:280px">
+          <select id="statusFilter">
+            <option value="">Tous statuts</option>
+            <option value="nouveau">nouveau</option>
+            <option value="contacté">contacté</option>
+            <option value="en_sequence">en_sequence</option>
+            <option value="CONTACTED">CONTACTED</option>
+            <option value="NEW">NEW</option>
+          </select>
+        </div>
+        <div class="row">
+          <button class="btn btn-dark" id="btnAdd" type="button">+ Ajouter</button>
+          <button class="btn btn-primary" id="btnCsv" type="button">Importer CSV</button>
+          <input type="file" id="csvFile" accept=".csv" style="display:none">
+        </div>
+      </div>
+      <div class="card" style="min-height:auto">
+        <div class="body" style="overflow:auto">
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th><th>Nom</th><th>Email</th><th>Entreprise / Poste</th><th>Statut</th><th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="tbody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="card" style="min-height:auto;margin-top:12px">
+        <h2>Creer / editer un prospect</h2>
+        <div class="body formgrid">
+          <input class="inp" id="pId" placeholder="ID (vide = creation)">
+          <input class="inp" id="pFirst" placeholder="Prenom">
+          <input class="inp" id="pLast" placeholder="Nom">
+          <input class="inp" id="pEmail" placeholder="Email *">
+          <input class="inp" id="pCompany" placeholder="Entreprise">
+          <input class="inp" id="pJob" placeholder="Poste">
+          <input class="inp" id="pStatus" placeholder="Statut (nouveau/contacté/en_sequence)">
+          <textarea id="pNotes" rows="3" placeholder="Notes"></textarea>
+          <div class="row">
+            <button class="btn btn-primary" id="btnSaveProspect" type="button">Enregistrer</button>
+            <button class="btn btn-dark" id="btnResetProspect" type="button">Reset formulaire</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SEQUENCES -->
+    <div id="panel-sequences" class="panel">
+      <div class="card" style="min-height:auto">
+        <h2>Studio Sequences (Phase 2)</h2>
+        <div class="body">
+          <div class="seq-grid">
+            <input class="inp" id="seqOffer" placeholder="Offre (ex: creation site web)">
+            <input class="inp" id="seqTarget" placeholder="Cible (ex: agences immobilieres)">
+            <select id="seqChannel">
+              <option value="both">Email + LinkedIn</option>
+              <option value="email">Email seul</option>
+              <option value="linkedin">LinkedIn seul</option>
+            </select>
+            <button class="btn btn-primary" id="btnGenSeq" type="button">Generer</button>
+          </div>
+          <p class="muted" style="margin-top:8px">Genere une sequence multi-etapes, puis applique le step1 email a un prospect.</p>
+          <div class="row" style="margin-top:10px">
+            <input class="inp" id="seqEmail" placeholder="Email prospect pour apply step1" style="max-width:320px">
+            <button class="btn btn-dark" id="btnApplyStep1" type="button">Apply step1 (DRY_RUN/LIVE)</button>
+          </div>
+          <div class="box" id="seqOut">Aucune sequence generee pour le moment.</div>
+        </div>
+      </div>
+
+      <div class="card" style="min-height:auto;margin-top:12px">
+        <h2>Templates</h2>
+        <div class="body">
+          <button class="btn btn-dark" id="btnTemplates" type="button">Charger templates API</button>
+          <pre class="box" id="tplOut" style="white-space:pre-wrap;font-size:12px;color:#cbd5e1">...</pre>
+        </div>
+      </div>
+    </div>
+
+    <!-- MEMORY -->
+    <div id="panel-memory" class="panel">
+      <div class="card" style="min-height:auto">
+        <h2>Memoire long terme — Offre / ICP (Phase 4)</h2>
+        <div class="body formgrid">
+          <input class="inp" id="kbName" placeholder="Nom de l'offre">
+          <textarea id="kbDesc" rows="3" placeholder="Description / promesse"></textarea>
+          <input class="inp" id="kbPrice" placeholder="Prix">
+          <input class="inp" id="kbTarget" placeholder="Cible ICP">
+          <input class="inp" id="kbPains" placeholder="Douleurs resolues">
+          <input class="inp" id="kbObjs" placeholder="Objections & reponses">
+          <div class="row">
+            <button class="btn btn-primary" id="btnSaveKb" type="button">Memoriser</button>
+            <button class="btn btn-dark" id="btnLoadKb" type="button">Recharger</button>
+          </div>
+          <div class="muted">L'agent utilise ces infos automatiquement dans ses reponses / emails / sequences.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+(function(){
+  var sessionId = "terminal_session";
+  var allProspects = [];
+
+  function $(id){ return document.getElementById(id); }
+
+  function addMsg(role, text, meta){
+    var box = $("messages");
+    var d = document.createElement("div");
+    d.className = "msg " + (role === "user" ? "user" : "agent");
+    d.textContent = text || "(vide)";
+    box.appendChild(d);
+    if(meta){
+      var m = document.createElement("div");
+      m.className = "meta";
+      m.textContent = meta;
+      box.appendChild(m);
+    }
+    box.scrollTop = box.scrollHeight;
+  }
+
+  function showTab(name){
+    var tabs = document.querySelectorAll(".tab");
+    for(var i=0;i<tabs.length;i++){
+      tabs[i].classList.toggle("active", tabs[i].getAttribute("data-tab") === name);
+    }
+    var panels = document.querySelectorAll(".panel");
+    for(var j=0;j<panels.length;j++){
+      panels[j].classList.remove("active");
+    }
+    var p = $("panel-" + name);
+    if(p) p.classList.add("active");
+    if(name === "prospects") loadProspects();
+    if(name === "memory") loadKb();
+    if(name === "sequences") loadTemplates(false);
+  }
+
+  function setMode(dry){
+    fetch("/api/config/email-mode", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({dry_run: !!dry})
+    }).then(function(){ loadHealth(); }).catch(function(){});
+  }
+
+  function loadHealth(){
+    fetch("/health").then(function(r){return r.json();}).then(function(d){
+      $("ai").textContent = d.gemini === "ok" ? ("IA ON · " + (d.model || "")) : ("IA FALLBACK");
+      $("mail").textContent = (d.email_mode === "DRY_RUN") ? "Email DRY_RUN" : "Email LIVE";
+    }).catch(function(){});
+  }
+
+  function loadStats(){
+    fetch("/api/admin/stats").then(function(r){return r.json();}).then(function(d){
+      $("sTotal").textContent = d.prospects_count || 0;
+      $("sNew").textContent = d.new_count || 0;
+      $("sContact").textContent = d.contacted_count || 0;
+      var es = d.email_stats || {};
+      $("sMail").textContent = (es.sent_or_simulated_today || 0) + "/" + (es.max_per_day || 30);
+    }).catch(function(){});
+  }
+
+  function loadActs(){
+    fetch("/api/activities?limit=30").then(function(r){return r.json();}).then(function(d){
+      var box = $("acts");
+      box.innerHTML = "";
+      (d.activities || []).forEach(function(a){
+        var el = document.createElement("div");
+        el.className = "act";
+        var st = a.status || "";
+        var cls = st === "sent" ? "ok" : ((st === "failed" || st === "blocked") ? "err" : "warn");
+        el.innerHTML = "<div><b>" + (a.action||"") + "</b> · <span class='" + cls + "'>" + st + "</span></div>" +
+                       "<div>" + (a.email_to || "-") + "</div>" +
+                       "<div style='color:#94a3b8'>" + (a.subject || "") + "</div>";
+        box.appendChild(el);
+      });
+    }).catch(function(){});
+  }
+
+  function renderProspects(list){
+    var tbody = $("tbody");
+    tbody.innerHTML = "";
+    (list || []).forEach(function(p){
+      var tr = document.createElement("tr");
+      var id = p.id;
+      var email = p.email || "";
+      tr.innerHTML =
+        "<td>" + id + "</td>" +
+        "<td>" + (p.first_name||"") + " " + (p.last_name||"") + "</td>" +
+        "<td>" + email + "</td>" +
+        "<td>" + (p.company||"N/A") + "<br><span class='muted'>" + (p.job_title||"") + "</span></td>" +
+        "<td>" + (p.status||"") + "</td>" +
+        "<td></td>";
+      var td = tr.lastChild;
+
+      function mkBtn(label, cls, fn){
+        var b = document.createElement("button");
+        b.type = "button";
+        b.className = "btn btn-sm " + cls;
+        b.textContent = label;
+        b.onclick = fn;
+        return b;
+      }
+
+      td.appendChild(mkBtn("Edit", "btn-dark", function(){
+        $("pId").value = id;
+        $("pFirst").value = p.first_name || "";
+        $("pLast").value = p.last_name || "";
+        $("pEmail").value = email;
+        $("pCompany").value = p.company || "";
+        $("pJob").value = p.job_title || "";
+        $("pStatus").value = p.status || "";
+        $("pNotes").value = p.notes || "";
+        window.scrollTo(0, document.body.scrollHeight);
+      }));
+      td.appendChild(document.createTextNode(" "));
+      td.appendChild(mkBtn("Mail", "btn-dark", function(){
+        sendChat("Envoie un cold email DRY_RUN a " + email);
+        showTab("chat");
+      }));
+      td.appendChild(document.createTextNode(" "));
+      td.appendChild(mkBtn("LinkedIn", "btn-dark", function(){
+        sendChat("Genere invitation + message LinkedIn pour " + email);
+        showTab("chat");
+      }));
+      td.appendChild(document.createTextNode(" "));
+      td.appendChild(mkBtn("Hist", "btn-dark", function(){
+        fetch("/api/prospects/" + id + "/history").then(function(r){return r.json();}).then(function(h){
+          alert(JSON.stringify(h, null, 2));
+        }).catch(function(e){ alert("Historique indisponible: " + e.message); });
+      }));
+      td.appendChild(document.createTextNode(" "));
+      td.appendChild(mkBtn("Suppr", "btn-danger", function(){
+        if(!window.confirm("Supprimer " + email + " ?")) return;
+        sendChat("Supprime maintenant le prospect " + email);
+      }));
+
+      tbody.appendChild(tr);
+    });
+  }
+
+  function filterProspects(){
+    var q = ($("q").value || "").toLowerCase();
+    var st = $("statusFilter").value || "";
+    var out = allProspects.filter(function(p){
+      var blob = ((p.first_name||"") + " " + (p.last_name||"") + " " + (p.email||"") + " " + (p.company||"")).toLowerCase();
+      var okQ = !q || blob.indexOf(q) !== -1;
+      var okS = !st || (p.status === st);
+      return okQ && okS;
+    });
+    renderProspects(out);
+  }
+
+  function loadProspects(){
+    fetch("/api/prospects?limit=200").then(function(r){return r.json();}).then(function(d){
+      allProspects = d.prospects || [];
+      filterProspects();
+      loadStats();
+    }).catch(function(){});
+  }
+
+  function resetProspectForm(){
+    $("pId").value = "";
+    $("pFirst").value = "";
+    $("pLast").value = "";
+    $("pEmail").value = "";
+    $("pCompany").value = "";
+    $("pJob").value = "";
+    $("pStatus").value = "nouveau";
+    $("pNotes").value = "";
+  }
+
+  function saveProspect(){
+    var id = ($("pId").value || "").trim();
+    var body = {
+      first_name: $("pFirst").value || "",
+      last_name: $("pLast").value || "",
+      email: ($("pEmail").value || "").trim(),
+      company: $("pCompany").value || "N/A",
+      job_title: $("pJob").value || "N/A",
+      status: $("pStatus").value || "nouveau",
+      notes: $("pNotes").value || ""
+    };
+    if(!body.email){ alert("Email requis"); return; }
+
+    var url = id ? ("/api/prospects/" + id) : "/api/prospects";
+    var method = id ? "PATCH" : "POST";
+
+    fetch(url, {
+      method: method,
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify(body)
+    }).then(function(r){return r.json();}).then(function(d){
+      if(d.error){ alert("Erreur: " + d.error); return; }
+      alert("Prospect enregistre");
+      resetProspectForm();
+      loadProspects();
+    }).catch(function(e){ alert(e.message); });
+  }
+
+  function loadKb(){
+    fetch("/api/kb/offer").then(function(r){return r.json();}).then(function(d){
+      var o = d.active_offer || {};
+      if(typeof o === "string"){ o = {}; }
+      $("kbName").value = o.offer_name || "";
+      $("kbDesc").value = o.offer_desc || "";
+      $("kbPrice").value = o.price || "";
+      $("kbTarget").value = o.target_icp || "";
+      $("kbPains").value = o.pain_points || "";
+      $("kbObjs").value = o.objections || "";
+    }).catch(function(){});
+  }
+
+  function saveKb(){
+    var body = {
+      offer_name: $("kbName").value || "",
+      offer_desc: $("kbDesc").value || "",
+      price: $("kbPrice").value || "",
+      target_icp: $("kbTarget").value || "",
+      pain_points: $("kbPains").value || "",
+      objections: $("kbObjs").value || ""
+    };
+    fetch("/api/kb/offer", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(body)
+    }).then(function(r){return r.json();}).then(function(d){
+      alert(d.message || "Memoire enregistree");
+    }).catch(function(e){ alert(e.message); });
+  }
+
+  function loadTemplates(showAlert){
+    fetch("/api/templates").then(function(r){return r.json();}).then(function(d){
+      $("tplOut").textContent = JSON.stringify(d, null, 2);
+      if(showAlert) alert("Templates charges");
+    }).catch(function(e){
+      $("tplOut").textContent = "Templates API indisponible: " + e.message;
+    });
+  }
+
+  function sendChat(msg){
+    if(!msg || !String(msg).trim()) return;
+    msg = String(msg).trim();
+    addMsg("user", msg);
+    var btn = $("send");
+    var input = $("prompt");
+    if(btn){ btn.disabled = true; btn.textContent = "..."; }
+    if(input) input.value = "";
+
+    fetch("/api/chat", {
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({message: msg, session_id: sessionId})
+    })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      var reply = d.reply || d.answer || d.error || "Pas de reponse";
+      var meta = "engine=" + (d.engine || "?") + (d.model ? (" · " + d.model) : "");
+      addMsg("agent", reply, meta);
+      // si sequence dans le texte, aussi afficher dans studio
+      if(String(reply).toLowerCase().indexOf("etape") !== -1 || String(reply).toLowerCase().indexOf("sequence") !== -1){
+        $("seqOut").textContent = reply;
+      }
+      loadStats(); loadHealth(); loadActs(); loadProspects();
+    })
+    .catch(function(err){
+      addMsg("agent", "Erreur connexion: " + (err && err.message ? err.message : err));
+    })
+    .then(function(){
+      if(btn){ btn.disabled = false; btn.textContent = "Envoyer"; }
+      if(input) input.focus();
+    });
+  }
+
+  // events
+  var tabs = document.querySelectorAll(".tab");
+  for(var i=0;i<tabs.length;i++){
+    tabs[i].onclick = function(){ showTab(this.getAttribute("data-tab")); };
+  }
+
+  $("form").onsubmit = function(e){
+    e.preventDefault();
+    sendChat($("prompt").value);
+    return false;
+  };
+
+  var chips = document.querySelectorAll(".chip");
+  for(var c=0;c<chips.length;c++){
+    chips[c].onclick = function(){ sendChat(this.getAttribute("data-msg")); };
+  }
+
+  $("btnDry").onclick = function(){ setMode(true); };
+  $("btnLive").onclick = function(){
+    if(window.confirm("Activer LIVE ? Les emails partent vraiment.")) setMode(false);
+  };
+
+  $("q").oninput = filterProspects;
+  $("statusFilter").onchange = filterProspects;
+  $("btnAdd").onclick = function(){ resetProspectForm(); $("pEmail").focus(); };
+  $("btnSaveProspect").onclick = saveProspect;
+  $("btnResetProspect").onclick = resetProspectForm;
+
+  $("btnCsv").onclick = function(){ $("csvFile").click(); };
+  $("csvFile").onchange = function(){
+    if(!this.files || !this.files[0]) return;
+    var fd = new FormData();
+    fd.append("file", this.files[0]);
+    fetch("/api/prospects/import", {method:"POST", body: fd})
+      .then(function(r){return r.json();})
+      .then(function(d){
+        alert(d.ok ? ((d.imported||0) + " importes, " + (d.skipped||0) + " ignores") : (d.error || "Erreur import"));
+        loadProspects();
+      })
+      .catch(function(e){ alert(e.message); });
+    this.value = "";
+  };
+
+  $("btnGenSeq").onclick = function(){
+    var offer = $("seqOffer").value || "votre offre";
+    var target = $("seqTarget").value || "votre cible";
+    var channel = $("seqChannel").value || "both";
+    sendChat("Genere une sequence de prospection (" + channel + ") pour vendre " + offer + " a " + target);
+    showTab("chat");
+  };
+  $("btnApplyStep1").onclick = function(){
+    var email = ($("seqEmail").value || "").trim();
+    var offer = $("seqOffer").value || "votre offre";
+    if(!email){ alert("Email prospect requis"); return; }
+    sendChat("Applique la sequence step1 a " + email + " offre: " + offer);
+    showTab("chat");
+  };
+  $("btnTemplates").onclick = function(){ loadTemplates(true); };
+
+  $("btnSaveKb").onclick = saveKb;
+  $("btnLoadKb").onclick = loadKb;
+
+  addMsg("agent", "Dashboard Phase 2/3/4 restaure.\n- Chat\n- Prospects CRM\n- Sequences\n- Memoire Offre\n\nSession: terminal_session");
+  loadStats(); loadHealth(); loadActs(); loadProspects(); loadKb();
+  console.log("DASHBOARD_PHASES_OK");
+})();
+</script>
+</body>
+</html>

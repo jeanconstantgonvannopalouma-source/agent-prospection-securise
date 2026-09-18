@@ -1,92 +1,148 @@
-﻿"""Moteur de génération de messages"""
+﻿"""
+MOTEUR DE COPYWRITING MULTI-CANAL AVEC BASE DE CONNAISSANCES DE JEAN CONSTANT
+"""
+import os
+import json
 import logging
-from typing import Dict, Optional
 import re
+from typing import Dict, Optional, Any
+from dotenv import load_dotenv
+import google.generativeai as genai
+from modules.knowledge_base import knowledge_base
 
+load_dotenv()
 logger = logging.getLogger(__name__)
 
-class MessageEngine:
-    """Génération de messages personnalisés"""
-    
+VALID_MODELS = [
+    os.getenv("GEMINI_MODEL", "gemini-3.6-flash"),
+    "gemini-3.6-flash",
+    "gemini-3.5-flash",
+    "gemini-flash-latest",
+    "gemini-3.5-flash-lite",
+    "gemini-3.7-flash"
+]
+
+class StratosphericMessageEngine:
+    """Moteur IA exploitant la base de connaissances métier de Jean Constant"""
+
     def __init__(self):
-        self.pain_point_responses = {
-            'acquisition': 'Notre plateforme aide à identifier les meilleurs prospects',
-            'conversion': 'Nous augmentons votre taux de conversion avec l\'IA',
-            'roi': 'Vous verrez un ROI de 300% en moins de 6 mois',
-            'temps': 'Gagnez 10h par semaine sur la prospection',
-        }
-    
-    def generate_personalized_message(self, prospect, pain_points: list, 
-                                     solution: str, tone: str = "professionnel") -> Optional[str]:
-        """Génère un message hyper-personnalisé"""
-        try:
-            logger.info(f"📝 Génération message pour {prospect.email}")
-            
-            # Template adapté
-            message = f"""Bonjour {prospect.first_name},
+        self.api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        self.active_model_name = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
 
-J'ai remarqué que {prospect.company_name} est dans le secteur {prospect.industry}.
+        if self.api_key:
+            try:
+                genai.configure(api_key=self.api_key)
+            except Exception as e:
+                logger.error(f"Erreur init Gemini: {e}")
 
-Nous aidons les entreprises comme la vôtre à:
-- Trouver les bons prospects rapidement
-- Augmenter le taux de conversion
-- Réduire le coût d'acquisition client
-
-Auriez-vous 15 minutes cette semaine pour en discuter?
-
-Cordialement,
-L'équipe Agent Prospection"""
-            
-            logger.info(f"✓ Message généré ({len(message)} caractères)")
-            return message
-            
-        except Exception as e:
-            logger.error(f"❌ Erreur génération: {e}")
+    def _call_gemini_resilient(self, prompt: str) -> Optional[str]:
+        if not self.api_key:
             return None
-    
-    def generate_objection_response(self, prospect, objection: str, context: str = "") -> Optional[str]:
-        """Génère une réponse à une objection"""
-        try:
-            logger.info(f"Réponse à objection: {objection[:50]}")
-            
-            response = f"""J'ai bien compris votre préoccupation concernant: {objection}
 
-Voici comment nous répondons à cette objection:
-- Solution 1: Adaptabilité complète à vos besoins
-- Solution 2: Essai gratuit pendant 30 jours
-- Solution 3: Support dédié inclus
+        full_prompt = f"{prompt}\n\nIMPORTANT: Réponds STRICTEMENT au format JSON valide, sans Markdown ```json autour."
 
-Quand pourrions-nous faire un point?"""
-            
-            return response
-            
-        except Exception as e:
-            logger.error(f"❌ Erreur réponse: {e}")
+        for model_name in VALID_MODELS:
+            if not model_name: continue
+            try:
+                m = genai.GenerativeModel(model_name)
+                response = m.generate_content(full_prompt)
+                self.active_model_name = model_name
+                return response.text.strip()
+            except Exception:
+                continue
+
+        return None
+
+    def _call_gemini_json(self, prompt: str) -> Optional[Dict[str, Any]]:
+        raw_text = self._call_gemini_resilient(prompt)
+        if not raw_text:
             return None
-    
-    def analyze_message_quality(self, message: str) -> Dict:
-        """Analyse la qualité d'un message"""
-        analysis = {
-            'length': len(message),
-            'word_count': len(message.split()),
-            'has_cta': bool(re.search(r'(disponible|rendez-vous|appel|réunion)', message, re.I)),
-            'has_personalization': bool(re.search(r'(votre|vos|vous)', message, re.I)),
-            'has_urgency': bool(re.search(r'(rapide|urgent|cette semaine)', message, re.I)),
-        }
-        
-        quality_score = 0
-        if analysis['length'] > 100:
-            quality_score += 20
-        if analysis['has_cta']:
-            quality_score += 25
-        if analysis['has_personalization']:
-            quality_score += 20
-        if analysis['has_urgency']:
-            quality_score += 15
-        
-        analysis['quality_score'] = min(100, quality_score)
-        
-        return analysis
+        try:
+            text = re.sub(r"^```json\s*", "", raw_text, flags=re.MULTILINE)
+            text = re.sub(r"^```\s*", "", text, flags=re.MULTILINE)
+            text = re.sub(r"\s*```$", "", text, flags=re.MULTILINE).strip()
+            return json.loads(text)
+        except Exception as e:
+            logger.error(f"Erreur parsing JSON: {e}")
+            return None
 
-# Instance globale
-message_engine = MessageEngine()
+    def generate_ab_test_messages(self, prospect: Any, value_prop: str = "") -> Dict[str, Any]:
+        p_name = getattr(prospect, 'first_name', None) or (prospect.get('first_name') if isinstance(prospect, dict) else 'Bonjour')
+        p_company = getattr(prospect, 'company_name', None) or (prospect.get('company') if isinstance(prospect, dict) else 'votre entreprise')
+        p_role = getattr(prospect, 'job_title', None) or (prospect.get('position') if isinstance(prospect, dict) else 'Dirigeant')
+        p_industry = getattr(prospect, 'industry', None) or (prospect.get('industry') if isinstance(prospect, dict) else 'B2B')
+        p_notes = getattr(prospect, 'notes', None) or (prospect.get('notes') if isinstance(prospect, dict) else '')
+
+        # Injection automatique de la base de connaissances
+        kb_context = knowledge_base.get_prompt_context()
+
+        prompt = f"""
+{kb_context}
+
+Rédige 2 variantes d'emails de prospection distinctes pour un A/B Test B2B.
+
+PROSPECT : {p_name}, {p_role} chez {p_company} (Secteur : {p_industry}).
+SIGNAL / ACTUALITÉ : {p_notes}
+OFFRE À VENDRE : {value_prop or knowledge_base.kb_data.get('core_value_prop')}
+
+Format JSON STRICT :
+{{
+    "variant_a": {{
+        "subject": "objet A",
+        "body": "corps email A",
+        "angle": "Framework PAS (Douleur)"
+    }},
+    "variant_b": {{
+        "subject": "objet B",
+        "body": "corps email B",
+        "angle": "Framework BAB (Preuve Sociale)"
+    }}
+}}
+"""
+        res = self._call_gemini_json(prompt)
+        if not res:
+            res = {
+                "variant_a": {
+                    "subject": f"Question rapide pour {p_company}",
+                    "body": f"Bonjour {p_name},\n\nProspecter manuellement prend jusqu'à 15h par semaine. Nous aidons les {p_role}s à automatiser cela.\n\nSeriez-vous ouvert à un rapide échange de 2 min ?",
+                    "angle": "Douleur"
+                },
+                "variant_b": {
+                    "subject": f"Résultats pour {p_company}",
+                    "body": f"Bonjour {p_name},\n\nNous avons aidé des entreprises du secteur {p_industry} à générer +35% de rendez-vous qualifiés.\n\nSeriez-vous curieux de découvrir comment ?",
+                    "angle": "Résultats"
+                }
+            }
+        return res
+
+    def generate_personalized_message(self, prospect: Any, value_prop: str = "", framework: str = "PAS") -> Dict[str, Any]:
+        ab = self.generate_ab_test_messages(prospect, value_prop)
+        chosen = ab.get("variant_a") if framework == "PAS" else ab.get("variant_b")
+        return {
+            "subject": chosen.get("subject"),
+            "body": chosen.get("body"),
+            "hook_used": chosen.get("angle"),
+            "quality_score": 9.5,
+            "framework": framework
+        }
+
+    def analyze_message_quality(self, message: str, subject: str = "") -> Dict[str, Any]:
+        spam_words = ['gratuit', '100%', 'urgent', 'offre', 'argent', 'promo', 'revenu', 'gagner', 'miracle']
+        found_spam = [w for w in spam_words if w in message.lower() or w in subject.lower()]
+        words = len(message.split())
+        has_cta = bool(re.search(r'\?|\b(disponible|échange|discuter|découvrir)\b', message, re.I))
+
+        score = 100 - (len(found_spam) * 15)
+        if words > 100: score -= 20
+        if words < 20: score -= 15
+        if not has_cta: score -= 20
+
+        return {
+            'word_count': words,
+            'spam_triggers_found': found_spam,
+            'has_clear_cta': has_cta,
+            'deliverability_score': max(0, min(100, score)),
+            'is_optimal': len(found_spam) == 0 and 30 <= words <= 90 and has_cta
+        }
+
+message_engine = StratosphericMessageEngine()

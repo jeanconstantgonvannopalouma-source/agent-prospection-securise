@@ -1,0 +1,11 @@
+﻿services:
+  - type: web
+    name: agent-prospection-stratospherique
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python server.py
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: ENV
+        value: production
