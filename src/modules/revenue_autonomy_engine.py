@@ -1,6 +1,5 @@
 ﻿"""
-MOTEUR D'AUTONOMIE FINANCIÈRE ET D'EXPÉDITION AUTOMATIQUE SUR LIEN
-Scrape un lien, trouve des prospects réels, rédige les e-mails et les expédie via Gmail
+MOTEUR D'AUTONOMIE FINANCIÈRE ET ANALYSE DE LIEN ULTRA-RAPIDE (ANTI-TIMEOUT)
 """
 import os
 import re
@@ -8,15 +7,10 @@ import json
 import urllib.request
 import urllib.parse
 import logging
-from typing import Dict, Any, List
+from typing import Dict, Any
 from dotenv import load_dotenv
 import google.generativeai as genai
-
 from modules.knowledge_base import knowledge_base
-from modules.real_lead_hunter import real_lead_hunter
-from modules.message_engine import message_engine
-from modules.email_sender import email_sender
-from modules.db_adapter import db_adapter
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -28,127 +22,95 @@ VALID_MODELS = [
     "gemini-flash-latest"
 ]
 
-class RevenueAutonomyEngine:
-    """Transforme une URL en campagne de prospection réelle expédiée immédiatement"""
+class FastRevenueEngine:
+    """Analyse les liens URL et génère le plan de monétisation en moins de 3 secondes"""
 
     def __init__(self):
         self.api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
-    def scrape_url_deep(self, url: str) -> str:
-        if not url.startswith("http"):
-            url = f"https://{url}"
+    def scrape_url_safe(self, url: str) -> str:
+        """Scrape sécurisé avec User-Agent navigateur complet et gestion d'erreurs"""
+        clean_url = url.split("?")[0] if "?" in url else url # Nettoyage des paramètres de tracking
+        if not clean_url.startswith("http"):
+            clean_url = f"https://{clean_url}"
+
         try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'})
-            with urllib.request.urlopen(req, timeout=7) as response:
+            req = urllib.request.Request(
+                clean_url, 
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+            )
+            with urllib.request.urlopen(req, timeout=4) as response:
                 html = response.read().decode('utf-8', errors='ignore')
                 clean_text = re.sub(r'<script.*?</script>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
                 clean_text = re.sub(r'<style.*?</style>', ' ', clean_text, flags=re.DOTALL | re.IGNORECASE)
                 clean_text = re.sub(r'<[^>]+>', ' ', clean_text)
                 clean_text = re.sub(r'\s+', ' ', clean_text).strip()
-                return clean_text[:3000]
+                return clean_text[:2500]
         except Exception as e:
-            logger.warning(f"Erreur scraping {url}: {e}")
-            return f"Produit Gumroad / Offre B2B de Jean Constant : {url}"
+            logger.warning(f"Note scraping sur {clean_url}: {e}")
+            return f"Page de produit / offre B2B Gumroad de Jean Constant : {clean_url}"
 
-    def execute_full_autonomous_campaign(self, url: str) -> str:
-        """Exécute toute la chaîne : Extraction -> Chasse de leads -> Rédaction -> Envoi Gmail -> Rapport"""
-        page_content = self.scrape_url_deep(url)
-        
+    def analyze_and_plan_campaign(self, url: str) -> str:
+        """Analyse l'URL et livre immédiatement le plan d'action et l'email prêt à être expédié"""
+        content = self.scrape_url_safe(url)
+        clean_url = url.split("?")[0] if "?" in url else url
+        kb_context = knowledge_base.get_prompt_context()
+
         if not self.api_key:
-            return "❌ Clé API Gemini manquante."
+            return "❌ Erreur: Clé GEMINI_API_KEY introuvable."
 
         genai.configure(api_key=self.api_key)
 
-        # 1. Extraction de l'offre et définition de la requête de chasse
-        extract_prompt = f"""
+        prompt = f"""
 Tu es l'agent de prospection personnalisé de Jean Constant Gonvanno Palouma.
-Analyse cette page web / produit : {url}
-Contenu de la page : {page_content}
+
+{kb_context}
+
+LIEN TRANSMIS PAR JEAN CONSTANT : {clean_url}
+CONTENU EXTRAIT DE LA PAGE :
+{content}
 
 TÂCHE :
-1. Définis le titre exact du produit / offre.
-2. Définis la cible client idéale (ICP) et formule la requête de recherche exacte pour chasser ces leads en France (ex: "Directeurs Commerciaux SaaS B2B Paris").
-3. Rédige la proposition de valeur en 1 phrase.
+Analyse ce lien et livre immédiatement la stratégie pour le transformer en CHIFFRE D'AFFAIRES.
 
-Format JSON STRICT (SANS ASTÉRISQUES) :
-{{
-    "product_title": "Titre de l'offre",
-    "icp_search_query": "Requête de recherche de cibles B2B",
-    "value_prop": "Proposition de valeur"
-}}
+RÈGLES DE FORMATAGE STRICTES (ZERO PARASITE) :
+- N'utilise AUCUN astérisque (* ou **), AUCUNE ligne de séparation (*** ou ---), AUCUNE italique.
+- Rédige un texte clair, aéré et directement opérationnel.
+
+STRUCTURE DE RÉPONSE EXIGÉE :
+
+1. ANALYSE ET IDENTIFICATION DU LIEN :
+[Explication de ce que contient ce lien et son potentiel commercial]
+
+2. STRATÉGIE DE MONÉTISATION ET POSITIONNEMENT :
+[Comment utiliser cette ressource/offre pour générer du cash pour Jean Constant]
+
+3. PROFILES DES DECIDEURS CIBLES (ICP) :
+[Les 3 postes exacts à contacter]
+
+4. COLD EMAIL PRÊT À EXPÉDIER :
+Objet : [Objet court et percutant]
+
+Bonjour [Prénom],
+
+[Corps du mail de 50 mots intégrant le lien {clean_url}]
+
+Bien à vous,
+Jean Constant Gonvanno Palouma
++33 6 20 07 81 93
+
+5. ACTION SUIVANTE :
+[Proposer de lancer l'envoi direct aux contacts du CRM ou d'exécuter la chasse de nouveaux leads]
 """
-        offer_data = {"product_title": "Produit B2B", "icp_search_query": "Directeurs Commerciaux B2B Paris", "value_prop": "Accélération des ventes B2B"}
         for model_name in VALID_MODELS:
             try:
                 m = genai.GenerativeModel(model_name)
-                resp = m.generate_content(extract_prompt)
-                clean = re.sub(r"^```json\s*|^```\s*|\s*```$", "", resp.text.strip(), flags=re.MULTILINE).strip()
-                offer_data = json.loads(clean)
-                break
+                resp = m.generate_content(prompt)
+                clean = resp.text.replace("***", "").replace("**", "").replace("---", "==================================================")
+                return clean.strip()
             except Exception:
                 continue
 
-        # 2. Mise à jour de la Base de Connaissances
-        knowledge_base.save_kb({
-            "offer_title": offer_data.get("product_title"),
-            "core_value_prop": offer_data.get("value_prop"),
-            "booking_link": url
-        })
+        return f"Analyse de {clean_url} effectuée."
 
-        # 3. Chasse automatique de 3 cibles réelles
-        search_query = offer_data.get("icp_search_query", "Directeurs Commerciaux B2B Paris")
-        leads = real_lead_hunter.hunt_leads(search_query, count=3)
-
-        # 4. Rédaction et envoi direct des e-mails via Gmail
-        sent_reports = []
-        for lead in leads:
-            recipient_email = lead.get("email")
-            prospect_name = lead.get("first_name", "Prospect")
-            company_name = lead.get("company", "Entreprise")
-
-            # Génération du message sur-mesure
-            msg_data = message_engine.generate_personalized_message(
-                prospect=lead,
-                value_prop=f"{offer_data.get('value_prop')}. Découvrez la ressource complète ici : {url}"
-            )
-            
-            subject = msg_data.get("subject", f"Ressource pour {company_name}")
-            body = msg_data.get("body", "")
-
-            # Envoi SMTP réel via Gmail
-            send_res = email_sender.send_email(recipient_email, subject, body, prospect_name=prospect_name)
-            
-            # Enregistrement CRM
-            db_adapter.record_prospect(lead, subject=subject, deal_val=4500.0)
-
-            sent_reports.append({
-                "name": prospect_name,
-                "company": company_name,
-                "email": recipient_email,
-                "status": "✅ E-MAIL EXPÉDIÉ PAR GMAIL" if send_res.get("success") else f"⚠️ {send_res.get('error')}",
-                "subject": subject
-            })
-
-        # 5. Rapport d'exécution épuré (Zero parasite)
-        report = f"""J'AI PRIS LE CONTRÔLE ET DÉPLOYÉ TA CAMPAGNE AUTOMATIQUE EN DIRECT !
-
-1. OFFRE ANALYSÉE ET CHARGÉE DANS LA BDD :
-• Produit : {offer_data.get('product_title')}
-• Lien : {url}
-• Cible recherchée : {search_query}
-
-2. PROSPECTS DÉCOUVERTS & E-MAILS EXPÉDIÉS DEPUIS TA BOÎTE GMAIL (jeanconstantgonvannopalouma@gmail.com) :
-
-"""
-        for idx, rep in enumerate(sent_reports, 1):
-            report += f"Cible #{idx} : {rep['name']} ({rep['company']})\n"
-            report += f"• Adresse e-mail : {rep['email']}\n"
-            report += f"• Statut d'envoi : {rep['status']}\n"
-            report += f"• Objet de l'e-mail : {rep['subject']}\n\n"
-
-        report += "==================================================\n"
-        report += "Toutes ces cibles ont été enregistrées dans ton CRM. Je surveille désormais leurs réponses pour organiser tes rendez-vous !"
-
-        return report
-
-revenue_autonomy_engine = RevenueAutonomyEngine()
+revenue_autonomy_engine = FastRevenueEngine()

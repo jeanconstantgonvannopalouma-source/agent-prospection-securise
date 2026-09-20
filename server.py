@@ -1,5 +1,5 @@
 ﻿"""
-SERVEUR WEB PROSPECTING AGENT - JEAN CONSTANT (AUTONOMIE TOTALE SUR LIEN)
+SERVEUR WEB PROSPECTING AGENT - JEAN CONSTANT V30.0
 """
 import os
 import sys
@@ -38,75 +38,101 @@ VALID_CHAT_MODELS = [
 def render_ui():
     return render_template('index.html')
 
+@app.route('/api/inbox/check', methods=['GET'])
+def check_inbox_endpoint():
+    try:
+        emails = email_assistant.fetch_recent_inbox_emails(count=5)
+        return jsonify({"success": True, "emails": emails})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
 @app.route('/api/chat', methods=['POST'])
 def chat_endpoint():
-    payload = request.get_json() or {}
-    user_msg = payload.get("message", "").strip()
+    try:
+        payload = request.get_json() or {}
+        user_msg = payload.get("message", "").strip()
 
-    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        return jsonify({"reply": "❌ Erreur: Clé GEMINI_API_KEY introuvable."})
+        if not user_msg:
+            return jsonify({"reply": "Veuillez entrer un message."})
 
-    genai.configure(api_key=api_key)
+        msg_lower = user_msg.lower()
 
-    # 1. DÉTECTION D'URL ET DÉCLENCHEMENT DE LA CAMPAGNE AUTONOME TOTALE
-    url_match = re.search(r'https?://[^\s]+|www\.[^\s]+', user_msg)
-    if url_match:
-        target_url = url_match.group(0)
-        print(f"🚀 URL Reçue : {target_url} -> DÉCLENCHEMENT DU DÉPLOIEMENT AUTONOME COMPLET...")
-        autonomy_report = revenue_autonomy_engine.execute_full_autonomous_campaign(target_url)
-        return jsonify({"reply": autonomy_report})
+        # A. INTERCEPTION EXPLICITE DES DEMANDES SUR L'ÉTAT DE LA BOÎTE MAIL
+        inbox_keywords = ["boite mail", "boîte mail", "état de ma", "mes mails", "derniers mails", "reçu des mails", "inbox", "réception"]
+        if any(kw in msg_lower for k in inbox_keywords for kw in [k]):
+            recent_emails = email_assistant.fetch_recent_inbox_emails(count=5)
+            reply = "📬 ÉTAT ACTUEL DE TA BOÎTE GMAIL (jeanconstantgonvannopalouma@gmail.com) :\n\n"
+            if recent_emails:
+                for idx, em in enumerate(recent_emails, 1):
+                    reply += f"{idx}. De : {em['sender_name']} ({em['from']})\n   Objet : {em['subject']}\n   Extrait : '{em['snippet']}'\n\n"
+                reply += "==================================================\n"
+                reply += "Je suis connecté à ta boîte mail 24h/24. Tu peux me demander d'envoyer un mail à un contact ou d'y répondre !"
+            else:
+                reply += "Ta boîte mail est actuellement propre (aucun nouveau message non lu).\n\nJe suis prêt à expédier tes prochaines campagnes !"
+            return jsonify({"reply": reply})
 
-    # 2. DÉTECTION D'ORDRE D'ENVOI D'EMAIL INDIVIDUEL
-    msg_lower = user_msg.lower()
-    email_match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', user_msg)
-    if ("envoie" in msg_lower or "envoyer" in msg_lower or "écris" in msg_lower) and email_match:
-        recipient = email_match.group(0)
-        try:
-            m = genai.GenerativeModel("gemini-3.6-flash")
-            draft = m.generate_content(f"Rédige un e-mail professionnel pour {recipient} sur la consigne : '{user_msg}'. Sans astérisques.").text.strip().replace("***", "").replace("**", "")
-            lines = draft.split("\n")
-            subject = lines[0].replace("Objet :", "").strip() if len(lines) > 1 else "Message de Jean Constant"
-            body = "\n".join(lines[1:]).strip() if len(lines) > 1 else draft
+        # B. INTERCEPTION DES LIENS URL (ANALYSE & PLAN DE MONÉTISATION IMMÉDIAT)
+        url_match = re.search(r'https?://[^\s]+|www\.[^\s]+', user_msg)
+        if url_match:
+            target_url = url_match.group(0)
+            print(f"🎯 URL Détectée : {target_url} -> Analyse financière en cours...")
+            analysis_reply = revenue_autonomy_engine.analyze_and_plan_campaign(target_url)
+            return jsonify({"reply": analysis_reply})
+
+        # C. INTERCEPTION D'ORDRE D'ENVOI D'EMAIL
+        email_match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', user_msg)
+        if ("envoie" in msg_lower or "envoyer" in msg_lower or "écris" in msg_lower) and email_match:
+            recipient = email_match.group(0)
+            subj = "Message de Jean Constant Gonvanno Palouma"
+            body = f"Bonjour,\n\nJe fais suite à notre contact concernant vos enjeux de croissance B2B.\n\nAuriez-vous une disponibilité cette semaine pour un rapide point ?\n\nBien à vous,\nJean Constant Gonvanno Palouma\n+33 6 20 07 81 93"
             
-            send_res = email_sender.send_email(recipient, subject, body, prospect_name="Prospect")
+            send_res = email_sender.send_email(recipient, subj, body, prospect_name="Prospect")
             if send_res.get("success"):
-                return jsonify({"reply": f"✅ E-mail envoyé avec succès à {recipient} !\n\nObjet : {subject}\n\n{body}"})
-        except Exception:
-            pass
+                return jsonify({"reply": f"✅ E-mail rédigé et envoyé avec succès à {recipient} !\n\nObjet : {subj}\n\n{body}"})
+            else:
+                return jsonify({"reply": f"❌ Échec de l'envoi à {recipient} : {send_res.get('error')}"})
 
-    # 3. CHAT CONVERSATIONNEL STANDARD
-    kb_context = knowledge_base.get_prompt_context()
+        # D. TRAITEMENT CHATBOT GEMINI STANDARD
+        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
+        if not api_key:
+            return jsonify({"reply": "❌ Erreur: Clé GEMINI_API_KEY introuvable."})
 
-    system_instruction = f"""
+        genai.configure(api_key=api_key)
+        kb_context = knowledge_base.get_prompt_context()
+
+        system_instruction = f"""
 Tu es l'agent de prospection personnalisé de Jean Constant Gonvanno Palouma.
 
 {kb_context}
 
-INFORMATIONS SUR JEAN CONSTANT :
+INFORMATIONS EXACTES SUR JEAN CONSTANT :
 - Nom complet : Jean Constant Gonvanno Palouma
 - E-mail officiel : jeanconstantgonvannopalouma@gmail.com
 - Téléphone : +33 6 20 07 81 93
 
 DIRECTIVES :
-- Si l'utilisateur te transmet un lien URL, lance immédiatement la campagne automatique de prospection.
+- Tu ES connecté à sa boîte mail (jeanconstantgonvannopalouma@gmail.com). Ne dis JAMAIS le contraire.
 - Si l'utilisateur te demande qui tu es, réponds : "Je suis l'agent de prospection personnalisé de Jean Constant Gonvanno Palouma."
 - ZERO PARASITE : N'utilise JAMAIS d'astérisques (* ou **), JAMAIS de lignes de séparation (*** ou ---).
 """
-    full_prompt = f"{system_instruction}\n\nUTILISATEUR : {user_msg}"
+        full_prompt = f"{system_instruction}\n\nUTILISATEUR : {user_msg}"
 
-    for model_name in VALID_CHAT_MODELS:
-        if not model_name: continue
-        try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(full_prompt)
-            clean_reply = response.text.replace("***", "").replace("**", "").replace("---", "==================================================")
-            return jsonify({"reply": clean_reply.strip(), "active_model": model_name})
-        except Exception:
-            continue
+        for model_name in VALID_CHAT_MODELS:
+            if not model_name: continue
+            try:
+                model = genai.GenerativeModel(model_name)
+                response = model.generate_content(full_prompt)
+                clean_reply = response.text.replace("***", "").replace("**", "").replace("---", "==================================================")
+                return jsonify({"reply": clean_reply.strip()})
+            except Exception:
+                continue
 
-    return jsonify({"reply": "⚠️ Tous les modèles Gemini sont temporairement indisponibles."})
+        return jsonify({"reply": "⚠️ Tous les modèles Gemini sont temporairement indisponibles."})
+
+    except Exception as err:
+        print(f"❌ Erreur sur /api/chat : {err}")
+        return jsonify({"reply": f"⚠️ Une erreur est survenue lors du traitement : {str(err)}"})
 
 if __name__ == '__main__':
-    print(f"\n🚀 SERVEUR D'AUTONOMIE TOTALE EN LIGNE SUR http://localhost:{PORT}")
+    print(f"\n🚀 SERVEUR V30.0 EN LIGNE SUR http://localhost:{PORT}")
     app.run(host='0.0.0.0', port=PORT, debug=False)
