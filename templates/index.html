@@ -18,32 +18,24 @@
         .container { max-width: 1050px; margin: auto; }
         .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 15px; margin-bottom: 20px; }
         .badge { background: #10b981; color: #022c22; padding: 5px 14px; border-radius: 20px; font-size: 13px; font-weight: 700; }
-        
         .tabs { display: flex; flex-direction: row; gap: 8px; margin-bottom: 20px; border-bottom: 1px solid var(--border); padding-bottom: 12px; flex-wrap: wrap; }
         .tab-btn { flex: 1; min-width: 110px; text-align: center; background: #1e293b; color: var(--text-muted); padding: 12px 10px; border-radius: 8px; border: 1px solid var(--border); cursor: pointer; font-weight: 600; font-size: 13px; transition: 0.2s; }
         .tab-btn.active { background: #2563eb; color: white; border-color: #3b82f6; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.3); }
-
         .tab-content { display: none; }
         .tab-content.active { display: block; }
-
         .card { background: var(--card-bg); padding: 20px; border-radius: 12px; border: 1px solid var(--border); margin-bottom: 20px; }
-
-        .chat-container { height: 380px; overflow-y: auto; background: #070a12; border: 1px solid var(--border); border-radius: 10px; padding: 20px; display: flex; flex-direction: column; gap: 15px; margin-bottom: 15px; }
+        .chat-container { height: 420px; overflow-y: auto; background: #070a12; border: 1px solid var(--border); border-radius: 10px; padding: 20px; display: flex; flex-direction: column; gap: 15px; margin-bottom: 15px; }
         .chat-bubble { max-width: 80%; padding: 14px 18px; border-radius: 12px; font-size: 14px; line-height: 1.6; white-space: pre-wrap; }
         .chat-user { align-self: flex-end; background: #2563eb; color: white; border-bottom-right-radius: 2px; }
         .chat-agent { align-self: flex-start; background: #1e293b; color: #e2e8f0; border: 1px solid #334155; border-bottom-left-radius: 2px; }
-
         .quick-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
         .chip { background: #1e293b; color: var(--accent); padding: 6px 12px; border-radius: 16px; font-size: 12px; border: 1px solid #334155; cursor: pointer; }
         .chip:hover { background: #334155; }
-
         .input-row { display: flex; gap: 10px; }
         input, textarea { width: 100%; padding: 12px; margin-top: 6px; margin-bottom: 14px; border-radius: 8px; border: 1px solid #334155; background: #0b0f19; color: white; font-size: 14px; box-sizing: border-box; }
         button { background: #2563eb; color: white; font-weight: bold; padding: 12px 24px; border-radius: 8px; border: none; cursor: pointer; transition: 0.2s; }
         button:hover { background: #1d4ed8; }
-
         .result-box { background: #020617; padding: 15px; border-radius: 8px; border: 1px solid #1e293b; color: var(--accent); white-space: pre-wrap; margin-top: 15px; font-family: monospace; display: none; }
-        .mail-card { background: #070a12; padding: 15px; border-radius: 8px; border: 1px solid #1e293b; margin-bottom: 12px; }
     </style>
 </head>
 <body>
@@ -51,15 +43,14 @@
         <div class="header">
             <div>
                 <h1 style="margin: 0; font-size: 24px; color: var(--accent);">🚀 Agent de Prospection</h1>
-                <p style="margin: 4px 0 0 0; color: var(--text-muted); font-size: 14px;">Agent personnalisé de Jean Constant</p>
+                <p style="margin: 4px 0 0 0; color: var(--text-muted); font-size: 14px;">Agent personnalisé de Jean Constant (avec Mémoire Long Terme)</p>
             </div>
-            <span class="badge">🟢 AGENT & BOÎTE MAIL ACTIFS</span>
+            <span class="badge">🟢 MÉMOIRE ACTIVE</span>
         </div>
 
         <div class="tabs">
             <button class="tab-btn active" data-tab="tab-chat">💬 Copilote Chat</button>
-            <button class="tab-btn" data-tab="tab-inbox">📬 Ma Boîte Mail</button>
-            <button class="tab-btn" data-tab="tab-hunt">🔍 Chasser Leads</button>
+            <button class="tab-btn" data-tab="tab-research">🌐 Recherche Web Approfondie</button>
             <button class="tab-btn" data-tab="tab-kb">📚 Mon Offre (KB)</button>
         </div>
 
@@ -67,63 +58,39 @@
         <div id="tab-chat" class="tab-content active">
             <div class="card" style="padding: 15px;">
                 <div class="quick-chips">
-                    <span class="chip" data-prompt="Regarde mes derniers mails">📬 Regarde mes derniers mails</span>
-                    <span class="chip" data-prompt="Envoie un mail à Thomas de Spendesk pour lui proposer un RDV mardi à 10h">✉️ Envoie un mail à Thomas</span>
                     <span class="chip" data-prompt="Prospecte Alexandre chez DataScale (SaaS B2B) qui vient de lever 2M€">🎯 Prospecte Alexandre</span>
+                    <span class="chip" data-prompt="Effectue une recherche approfondie sur le site payfit.com">🌐 Recherche payfit.com</span>
+                    <span class="chip" data-prompt="Réécris le dernier email en le rendant plus court">✏️ Réécrire le dernier message</span>
                 </div>
 
                 <div class="chat-container" id="chatBox">
                     <div class="chat-bubble chat-agent">Bonjour ! Je suis l'agent de prospection personnalisé de Jean Constant.
 
-Je suis directement connecté à ta boîte mail ! Tu peux me dire :
-- *"Regarde mes derniers mails"*
-- *"Envoie un mail à Thomas pour lui proposer un RDV mardi"*
-- *"Prospecte Alexandre chez DataScale"*</div>
+Je dispose désormais d'une mémoire conversationnelle ! Tu peux me parler naturellement et me demander d'ajuster ou de préciser nos échanges précédents.</div>
                 </div>
 
                 <div class="input-row">
-                    <input type="text" id="userInput" placeholder="Ecrivez votre ordre ici...">
+                    <input type="text" id="userInput" placeholder="Écrivez votre message ici...">
                     <button id="sendBtn">Envoyer 🚀</button>
                 </div>
             </div>
         </div>
 
-        <!-- TAB INBOX ASSISTANT -->
-        <div id="tab-inbox" class="tab-content">
+        <!-- TAB RECHERCHE APPROFONDIE -->
+        <div id="tab-research" class="tab-content">
             <div class="card">
-                <h3 style="margin-top: 0; color: var(--accent);">📬 Ma Boîte de Réception (Lecture IMAP & Envoi Automatique)</h3>
-                <button id="checkInboxBtn">🔄 Relever les derniers emails reçus</button>
-                <div id="inboxContainer" style="margin-top: 15px;">
-                    <p style="color: var(--text-muted);">Cliquez sur le bouton ci-dessus pour relever vos messages.</p>
-                </div>
-
-                <hr style="border-color: var(--border); margin: 25px 0;">
-
-                <h3 style="color: var(--accent);">✉️ Envoyer un Email direct à un Contact CRM (Sans taper son adresse)</h3>
-                <label>Nom du contact ou entreprise :</label>
-                <input type="text" id="autoContact" value="Thomas de Spendesk">
-                <label>Consigne pour le message :</label>
-                <input type="text" id="autoInstruction" value="Remercier pour l'échange et proposer une démo mardi à 14h">
-                <button id="sendAutoBtn">🚀 Envoyer le mail automatiquement par l'IA</button>
-                <div id="sendAutoOut" class="result-box"></div>
-            </div>
-        </div>
-
-        <!-- TAB HUNT LEADS -->
-        <div id="tab-hunt" class="tab-content">
-            <div class="card">
-                <h3 style="margin-top: 0; color: var(--accent);">🔍 Chasseur Autonome de Vrais Leads</h3>
-                <input type="text" id="huntQuery" value="Directeurs Commerciaux SaaS B2B Paris">
-                <input type="number" id="huntCount" value="3" max="5">
-                <button id="huntBtn">🔍 Lancer la Chasse & Valider MX</button>
-                <div id="huntOut" class="result-box"></div>
+                <h3 style="margin-top: 0; color: var(--accent);">🌐 Moteur de Recherche Web Approfondie</h3>
+                <label>Nom de l'entreprise ou domaine web (ex: spendesk.com, payfit.com) :</label>
+                <input type="text" id="researchTarget" value="payfit.com">
+                <button id="researchBtn">🔍 Lancer l'Analyse Web Approfondie</button>
+                <div id="researchOut" class="result-box"></div>
             </div>
         </div>
 
         <!-- TAB MON OFFRE -->
         <div id="tab-kb" class="tab-content">
             <div class="card">
-                <h3 style="margin-top: 0; color: var(--accent);">📚 Base de Connaissances</h3>
+                <h3 style="margin-top: 0; color: var(--accent);">📚 Configuration de l'Offre de Jean Constant</h3>
                 <input type="text" id="kbCompany">
                 <textarea id="kbProp" rows="2"></textarea>
                 <textarea id="kbProof" rows="3"></textarea>
@@ -131,10 +98,12 @@ Je suis directement connecté à ta boîte mail ! Tu peux me dire :
                 <div id="kbOut" class="result-box"></div>
             </div>
         </div>
-
     </div>
 
     <script>
+        // Historique de conversation conservé en mémoire locale du navigateur
+        var chatHistory = [];
+
         document.addEventListener('DOMContentLoaded', function() {
             document.querySelectorAll('.tab-btn').forEach(function(btn) {
                 btn.addEventListener('click', function() {
@@ -143,7 +112,7 @@ Je suis directement connecté à ta boîte mail ! Tu peux me dire :
                     document.querySelectorAll('.tab-content').forEach(function(c) { c.classList.remove('active'); });
                     this.classList.add('active');
                     document.getElementById(targetTab).classList.add('active');
-                    if(targetTab === 'tab-inbox') loadInbox();
+                    if(targetTab === 'tab-kb') loadKB();
                 });
             });
 
@@ -158,51 +127,49 @@ Je suis directement connecté à ta boîte mail ! Tu peux me dire :
                 if (e.key === 'Enter') sendMessage();
             });
 
-            document.getElementById('checkInboxBtn').addEventListener('click', loadInbox);
-            document.getElementById('sendAutoBtn').addEventListener('click', sendAutoMail);
             document.getElementById('saveKbBtn').addEventListener('click', saveKB);
-            document.getElementById('huntBtn').addEventListener('click', runHunt);
+            document.getElementById('researchBtn').addEventListener('click', runDeepResearch);
         });
 
-        async function loadInbox() {
-            var container = document.getElementById('inboxContainer');
-            container.innerHTML = "<p style='color: var(--accent);'>⏳ Relevé des emails en cours...</p>";
-            try {
-                var res = await fetch('/api/inbox/check');
-                var data = await res.json();
-                var html = '';
-                data.emails.forEach(function(em) {
-                    html += '<div class="mail-card">';
-                    html += '<div style="font-weight: bold; color: #38bdf8;">' + em.sender_name + ' &lt;' + em.from + '&gt;</div>';
-                    html += '<div style="font-size: 13px; color: #f8fafc; margin: 4px 0;">Objet : ' + em.subject + '</div>';
-                    html += '<div style="font-size: 12px; color: #94a3b8;">"' + em.snippet + '"</div>';
-                    html += '</div>';
-                });
-                container.innerHTML = html || "<p>Aucun mail reçu récemment.</p>";
-            } catch(e) { container.innerHTML = "<p style='color: red;'>Erreur de lecture IMAP.</p>"; }
-        }
-
-        async function sendAutoMail() {
-            var out = document.getElementById('sendAutoOut');
+        async function runDeepResearch() {
+            var out = document.getElementById('researchOut');
             out.style.display = 'block';
-            out.textContent = "⏳ Recherche du contact dans la BDD & rédaction par l'IA...";
-            var payload = {
-                contact: document.getElementById('autoContact').value,
-                instruction: document.getElementById('autoInstruction').value
-            };
+            out.textContent = "⏳ Exploration du site web et synthèse en cours...";
+            var target = document.getElementById('researchTarget').value;
             try {
-                var res = await fetch('/api/inbox/send-auto', {
+                var res = await fetch('/api/deep-research', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
+                    body: JSON.stringify({ target: target })
                 });
                 var data = await res.json();
-                if (data.success) {
-                    out.textContent = "✅ EMAIL ENVOYÉ À " + data.recipient_name + " (" + data.recipient_email + ") !\n\nObjet : " + data.subject + "\n\n" + data.body;
-                } else {
-                    out.textContent = "⚠️ " + data.error;
-                }
-            } catch(e) { out.textContent = "Erreur d'envoi: " + e; }
+                out.textContent = data.result.summary_text || "Analyse terminée.";
+            } catch(e) { out.textContent = "Erreur de recherche : " + e; }
+        }
+
+        async function loadKB() {
+            try {
+                var res = await fetch('/api/knowledge-base');
+                var data = await res.json();
+                document.getElementById('kbCompany').value = data.company_name || '';
+                document.getElementById('kbProp').value = data.core_value_prop || '';
+                document.getElementById('kbProof').value = data.proof_points_and_case_studies || '';
+            } catch(e){}
+        }
+
+        async function saveKB() {
+            var out = document.getElementById('kbOut');
+            out.style.display = 'block';
+            out.textContent = "⏳ Sauvegarde...";
+            var payload = {
+                company_name: document.getElementById('kbCompany').value,
+                core_value_prop: document.getElementById('kbProp').value,
+                proof_points_and_case_studies: document.getElementById('kbProof').value
+            };
+            try {
+                await fetch('/api/knowledge-base', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                out.textContent = "✅ Base de connaissances enregistrée !";
+            } catch(e) { out.textContent = "Erreur: " + e; }
         }
 
         async function sendMessage() {
@@ -219,46 +186,31 @@ Je suis directement connecté à ta boîte mail ! Tu peux me dire :
             input.value = '';
             chatBox.scrollTop = chatBox.scrollHeight;
 
+            // Enregistrement dans l'historique local
+            chatHistory.push({ role: 'user', content: msg });
+
             var agentBubble = document.createElement('div');
             agentBubble.className = 'chat-bubble chat-agent';
-            agentBubble.textContent = "⏳ L'agent consulte la boîte mail et prépare la réponse...";
+            agentBubble.textContent = "⏳ L'agent consulte l'historique et prépare sa réponse...";
             chatBox.appendChild(agentBubble);
             chatBox.scrollTop = chatBox.scrollHeight;
 
             try {
-                var res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message: msg }) });
-                var data = await res.json();
-                agentBubble.textContent = data.reply || "Aucune réponse reçue.";
-            } catch(e) { agentBubble.textContent = "❌ Erreur de connexion."; }
-            chatBox.scrollTop = chatBox.scrollHeight;
-        }
-
-        async function runHunt() {
-            var out = document.getElementById('huntOut');
-            out.style.display = 'block';
-            out.textContent = "⏳ Chasse web & vérification MX...";
-            var payload = { query: document.getElementById('huntQuery').value, count: parseInt(document.getElementById('huntCount').value) || 3 };
-            try {
-                var res = await fetch('/api/hunt-leads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-                var data = await res.json();
-                var txt = "🎯 LEADS DÉCOUVERTS & INJECTÉS DANS LE CRM :\n\n";
-                data.leads.forEach(function(l, i) {
-                    txt += (i+1) + ". " + l.first_name + " (" + l.position + " chez " + l.company + ")\n";
-                    txt += "   • Email pro : " + l.email + " [" + l.email_status + "]\n\n";
+                var res = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: msg, history: chatHistory })
                 });
-                out.textContent = txt;
-            } catch(e) { out.textContent = "Erreur : " + e; }
-        }
-
-        async function saveKB() {
-            var out = document.getElementById('kbOut');
-            out.style.display = 'block';
-            out.textContent = "⏳ Sauvegarde...";
-            var payload = { company_name: document.getElementById('kbCompany').value, core_value_prop: document.getElementById('kbProp').value, proof_points_and_case_studies: document.getElementById('kbProof').value };
-            try {
-                await fetch('/api/knowledge-base', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-                out.textContent = "✅ Base de connaissances enregistrée !";
-            } catch(e) { out.textContent = "Erreur: " + e; }
+                var data = await res.json();
+                var replyText = data.reply || "Aucune réponse reçue.";
+                agentBubble.textContent = replyText;
+                
+                // Enregistrement de la réponse de l'agent dans l'historique
+                chatHistory.push({ role: 'agent', content: replyText });
+            } catch(e) {
+                agentBubble.textContent = "❌ Erreur de connexion.";
+            }
+            chatBox.scrollTop = chatBox.scrollHeight;
         }
     </script>
 </body>

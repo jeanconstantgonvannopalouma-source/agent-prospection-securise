@@ -1,9 +1,10 @@
 ﻿"""
-SERVEUR WEB PROSPECTING AGENT - JEAN CONSTANT V27.1 (DIAGNOSTIC ERREUR RENDER)
+SERVEUR WEB PROSPECTING AGENT - JEAN CONSTANT (MÉMOIRE & DEEP RESEARCH)
 """
 import os
 import sys
 import warnings
+import re
 
 warnings.filterwarnings("ignore")
 sys.path.insert(0, os.path.abspath("src"))
@@ -17,25 +18,19 @@ from modules.db_adapter import db_adapter
 from modules.knowledge_base import knowledge_base
 from modules.email_assistant import email_assistant
 from modules.email_sender import email_sender
+from modules.web_researcher import web_researcher
 
 app = Flask(__name__, template_folder='templates')
 CORS(app)
 
 PORT = int(os.getenv("PORT", "5001"))
 
-# Liste élargie des modèles Gemini supportés par l'API
-CANDIDATE_MODELS = [
-    os.getenv("GEMINI_MODEL", "").strip().strip('"').strip("'"),
-    "gemini-1.5-flash",
-    "gemini-2.0-flash",
-    "gemini-1.5-pro",
-    "gemini-2.5-flash",
+VALID_CHAT_MODELS = [
+    os.getenv("GEMINI_MODEL", "gemini-3.6-flash"),
     "gemini-3.6-flash",
     "gemini-3.5-flash",
     "gemini-flash-latest"
 ]
-# Filtrage des éléments vides
-CANDIDATE_MODELS = [m for m in CANDIDATE_MODELS if m]
 
 @app.route('/')
 @app.route('/ui')
@@ -43,94 +38,92 @@ CANDIDATE_MODELS = [m for m in CANDIDATE_MODELS if m]
 def render_ui():
     return render_template('index.html')
 
-@app.route('/api/inbox/check', methods=['GET'])
-def check_inbox_endpoint():
-    emails = email_assistant.fetch_recent_inbox_emails(count=5)
-    return jsonify({"success": True, "emails": emails})
+@app.route('/api/deep-research', methods=['POST'])
+def deep_research_endpoint():
+    payload = request.get_json() or {}
+    target = payload.get("target", "payfit.com")
+    result = web_researcher.deep_search_company(target)
+    return jsonify({"success": True, "result": result})
+
+@app.route('/api/knowledge-base', methods=['GET', 'POST'])
+def kb_endpoint():
+    if request.method == 'GET':
+        return jsonify(knowledge_base.kb_data)
+    else:
+        payload = request.get_json() or {}
+        knowledge_base.save_kb(payload)
+        return jsonify({"success": True, "data": knowledge_base.kb_data})
 
 @app.route('/api/chat', methods=['POST'])
 def chat_endpoint():
     payload = request.get_json() or {}
     user_msg = payload.get("message", "").strip()
+    history = payload.get("history", [])
 
-    raw_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
-    api_key = raw_key.strip().strip('"').strip("'")
-
+    api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
     if not api_key:
-        return jsonify({"reply": "❌ Erreur: Clé GEMINI_API_KEY introuvable sur Render. Veuillez l'ajouter dans l'onglet Environment de Render."})
+        return jsonify({"reply": "❌ Erreur: Clé GEMINI_API_KEY introuvable dans .env"})
 
-    try:
-        genai.configure(api_key=api_key)
-    except Exception as e:
-        return jsonify({"reply": f"❌ Erreur de configuration de la clé API : {str(e)}"})
+    genai.configure(api_key=api_key)
 
-    recent_emails = email_assistant.fetch_recent_inbox_emails(count=5)
-    stats = db_adapter.get_stats()
-    recent_contacts = stats.get("recent_prospects", [])
-
-    inbox_context_text = "MESSAGES DANS TA BOÎTE GMAIL (jeanconstantgonvannopalouma@gmail.com) :\n"
-    for idx, em in enumerate(recent_emails, 1):
-        inbox_context_text += f"{idx}. De: {em['sender_name']} ({em['from']}) | Objet: {em['subject']}\n"
-
-    crm_context_text = "\nCONTACTS CRM DISPONIBLES :\n"
-    for c in recent_contacts:
-        crm_context_text += f"- {c.get('first_name')} ({c.get('company')}) -> Email: {c.get('email')}\n"
-
-    msg_lower = user_msg.lower()
-    if "envoie un mail à" in msg_lower or "envoyer un mail à" in msg_lower or "écris un mail à" in msg_lower:
-        target_query = user_msg.replace("envoie un mail à", "").replace("envoyer un mail à", "").replace("écris un mail à", "").strip()
-        contact = email_assistant.resolve_contact_email(target_query.split()[0])
-        
-        target_email = contact.get("email") if contact else None
-        target_name = contact.get("first_name") if contact else target_query.split()[0]
-
-        if target_email:
-            subj = f"Échange concernant {contact.get('company', 'votre projet')}"
-            body = f"Bonjour {target_name},\n\nJe fais suite à nos récents échanges. Auriez-vous une disponibilité cette semaine pour un rapide point ?\n\nBien à vous,\nJean Constant Gonvanno Palouma\n+33 6 20 07 81 93"
-            
-            email_sender.send_email(target_email, subj, body, prospect_name=target_name)
-            return jsonify({
-                "reply": f"✅ EMAIL RÉDIGÉ ET ENVOYÉ À {target_name} ({target_email}) !\n\nObjet : {subj}\n\n{body}"
-            })
+    # Reconstruction de l'historique conversationnel pour Gemini
+    history_context = "HISTORIQUE DE LA CONVERSATION EN COURS :\n"
+    for item in history[-8:]: # Conserve les 8 derniers messages
+        role_label = "Utilisateur" if item.get("role") == "user" else "Agent"
+        history_context += f"{role_label}: {item.get('content')}\n"
 
     kb_context = knowledge_base.get_prompt_context()
 
     system_instruction = f"""
-Tu es l'agent de prospection personnalisé de Jean Constant Gonvanno Palouma.
+Tu es l'agent de prospection personnalisé de Jean Constant.
 
 {kb_context}
 
-INFORMATIONS EXACTES SUR JEAN CONSTANT GONVANNO PALOUMA :
-- Son nom complet : Jean Constant Gonvanno Palouma
-- Son adresse e-mail officielle : jeanconstantgonvannopalouma@gmail.com
-- Son téléphone : +33 6 20 07 81 93
+INFORMATIONS SUR JEAN CONSTANT :
+- Nom complet : Jean Constant Gonvanno Palouma
+- E-mail officiel : jeanconstantgonvannopalouma@gmail.com
+- Téléphone : +33 6 20 07 81 93
 
-{inbox_context_text}
-{crm_context_text}
+{history_context}
 
 DIRECTIVES DE COMPORTEMENT :
-- Si l'utilisateur te demande quelle est son adresse e-mail, réponds TOUJOURS : "Ton adresse e-mail officielle est jeanconstantgonvannopalouma@gmail.com".
-- Si l'utilisateur te demande son numéro de téléphone, réponds : "+33 6 20 07 81 93".
-- Si l'utilisateur te demande qui tu es, réponds : "Je suis l'agent de prospection personnalisé de Jean Constant Gonvanno Palouma."
-- N'utilise JAMAIS d'astérisques (* ou **), JAMAIS de lignes de séparation (*** ou ---). Texte ultra-propre et direct.
+- Utilise l'HISTORIQUE DE LA CONVERSATION ci-dessus pour comprendre le contexte des échanges précédents.
+- Si l'utilisateur te demande de modifier, raccourcir ou adapter un message précédent, réfère-toi au message déjà généré dans l'historique.
+- Si l'utilisateur te demande qui tu es, réponds : "Je suis l'agent de prospection personnalisé de Jean Constant."
+- RÈGLES DE FORMATAGE STRICTES : N'utilise JAMAIS d'astérisques (* ou **), JAMAIS de lignes de séparation (*** ou ---). Texte ultra-propre et naturel.
 """
-    full_prompt = f"{system_instruction}\n\nUTILISATEUR : {user_msg}"
+    full_prompt = f"{system_instruction}\n\nDERNIER MESSAGE DE L'UTILISATEUR : {user_msg}"
 
-    last_error_msg = ""
-    for model_name in CANDIDATE_MODELS:
+    # Envoi direct d'email si demandé avec adresse explicite
+    msg_lower = user_msg.lower()
+    email_match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', user_msg)
+    if ("envoie" in msg_lower or "envoyer" in msg_lower or "écris" in msg_lower) and email_match:
+        recipient = email_match.group(0)
+        try:
+            m = genai.GenerativeModel("gemini-3.6-flash")
+            draft = m.generate_content(f"Rédige un e-mail professionnel pour {recipient} sur la consigne : '{user_msg}'. Sans astérisques.").text.strip().replace("***", "").replace("**", "")
+            lines = draft.split("\n")
+            subject = lines[0].replace("Objet :", "").strip() if len(lines) > 1 else "Message de Jean Constant"
+            body = "\n".join(lines[1:]).strip() if len(lines) > 1 else draft
+            
+            send_res = email_sender.send_email(recipient, subject, body)
+            if send_res.get("success"):
+                return jsonify({"reply": f"✅ E-mail envoyé avec succès à {recipient} !\n\nObjet : {subject}\n\n{body}"})
+        except Exception as e:
+            pass
+
+    for model_name in VALID_CHAT_MODELS:
+        if not model_name: continue
         try:
             model = genai.GenerativeModel(model_name)
             response = model.generate_content(full_prompt)
-            clean_reply = response.text.replace("***", "").replace("---", "==================================================")
-            print(f"✓ Succès avec le modèle : {model_name}")
+            clean_reply = response.text.replace("***", "").replace("**", "").replace("---", "==================================================")
             return jsonify({"reply": clean_reply.strip(), "active_model": model_name})
-        except Exception as e:
-            last_error_msg = str(e)
-            print(f"⚠️ Échec sur {model_name} : {last_error_msg}")
+        except Exception:
             continue
 
-    return jsonify({"reply": f"⚠️ Impossible de contacter Gemini sur Render.\nDétail de l'erreur reçue de l'API : {last_error_msg}"})
+    return jsonify({"reply": "⚠️ Tous les modèles Gemini sont temporairement indisponibles."})
 
 if __name__ == '__main__':
-    print(f"\n🚀 SERVEUR CLOUD EN LIGNE SUR http://localhost:{PORT}")
+    print(f"\n🚀 SERVEUR V28.0 (MÉMOIRE & DEEP SEARCH) EN LIGNE SUR http://localhost:{PORT}")
     app.run(host='0.0.0.0', port=PORT, debug=False)
